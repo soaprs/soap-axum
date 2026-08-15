@@ -125,6 +125,18 @@ The default global encoded-body ceiling is 2 MiB. Endpoint `BodyLimitPolicy`
 can lower it. Trusted proxy processing and request-ID generation must be
 installed explicitly by boundary middleware.
 
+## Vertical-slice acceptance test
+
+`tests/reference_application.rs` composes catalog registration, normalized
+path/query/header/body input, `RouteIo`, a pure `UseCase`, authentication,
+application-owned validation and rate-limit plugins, endpoint middleware,
+telemetry hooks, response effects, response policies, and a deadline. Its four
+requests prove ordered short-circuit behavior for 401, 422, 201, and 429.
+
+```console
+cargo test --all-features --test reference_application
+```
+
 ## Deliberate first-slice exclusions
 
 The crate does not implement authentication mechanisms, validation engines,
