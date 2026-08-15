@@ -1,6 +1,6 @@
 [package]
 name = "soaprs-axum"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Axum HTTP adapter for soaprs"
@@ -22,12 +22,12 @@ form_urlencoded = "1"
 http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-soaprs-core = { version = "0.4.0", path = "../soaprs/crates/soaprs-core" }
-soaprs-http = { version = "0.4.0", path = "../soaprs/crates/soaprs-http" }
-soaprs-auth = { version = "0.4.0", path = "../soaprs/crates/soaprs-auth", optional = true }
-soaprs-auth-http = { version = "0.4.0", path = "../soaprs/crates/soaprs-auth-http", optional = true }
-soaprs-rate-limit = { version = "0.4.0", path = "../soap-rate-limit", optional = true }
-soaprs-validation = { version = "0.4.0", path = "../soap-validation", optional = true }
+soaprs-core = { version = "0.5.0", path = "../soaprs/crates/soaprs-core" }
+soaprs-http = { version = "0.5.0", path = "../soaprs/crates/soaprs-http" }
+soaprs-auth = { version = "0.5.0", path = "../soaprs/crates/soaprs-auth", optional = true }
+soaprs-auth-http = { version = "0.5.0", path = "../soaprs/crates/soaprs-auth-http", optional = true }
+soaprs-rate-limit = { version = "0.5.0", path = "../soap-rate-limit", optional = true }
+soaprs-validation = { version = "0.5.0", path = "../soap-validation", optional = true }
 tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]

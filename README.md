@@ -1,6 +1,6 @@
 # soaprs-axum
 
-`soaprs-axum` 0.4 turns a `soaprs-http` `EndpointCatalog` into an Axum 0.8
+`soaprs-axum` 0.5 turns a `soaprs-http` `EndpointCatalog` into an Axum 0.8
 router. It keeps transport mapping at the HTTP boundary and lets application
 use cases operate exclusively on typed input and output.
 
@@ -77,7 +77,7 @@ The `auth` feature composes the framework-neutral contracts from `soaprs-auth`
 and `soaprs-auth-http` as ordinary endpoint middleware:
 
 ```toml
-soaprs-axum = { version = "0.4", features = ["auth"] }
+soaprs-axum = { version = "0.5", features = ["auth"] }
 ```
 
 `AuthenticationMiddleware` delegates credential extraction and authentication
@@ -116,14 +116,14 @@ to enter the neutral limiter.
 
 ```toml
 soaprs-axum = {
-  version = "0.4",
+  version = "0.5",
   features = ["auth", "validation", "rate-limit"]
 }
 ```
 
-The capability repositories currently track the post-0.4 upstream contract;
-the workspace uses sibling checkouts until the next compatible soaprs release
-publishes `SoapErrorKind::RateLimited` and the two capability crates.
+The capability crates share the `0.5` contract line with `soaprs` and this
+adapter. Sibling path dependencies keep repository development atomic; packaged
+releases resolve the same versions from the registry.
 
 ## Portable response policies
 
