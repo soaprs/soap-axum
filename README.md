@@ -12,6 +12,7 @@ Axum request
   → UseCase::execute
   → RouteIo::map_response
   → HttpResponseEffects
+  → endpoint response policies
   → Axum response
 ```
 
@@ -90,6 +91,19 @@ business rules.
 The middleware can be registered globally, by a `RouterPlugin`, or on a single
 `EndpointBinding`, using the same ordering rules as every other extension.
 
+## Portable response policies
+
+The adapter translates `SecurityHeadersPolicy` and `ResponseCachePolicy` from
+endpoint metadata into final HTTP headers. This is deterministic protocol
+mapping, not a security or cache implementation.
+
+Security defaults (`nosniff`, frame denial, and no-referrer) cover successful,
+application-error, and request-normalization responses. Declared CSP, HSTS,
+frame, referrer, cache-control, and `Vary` values are also projected. Policy
+values are applied after route and middleware response effects, so an endpoint
+declaration wins on collisions. `without_security_headers()` delegates those
+headers entirely to application code or external middleware.
+
 ## Running the example
 
 ```console
@@ -110,6 +124,7 @@ installed explicitly by boundary middleware.
 ## Deliberate first-slice exclusions
 
 The crate does not implement authentication mechanisms, validation engines,
-rate-limit algorithms, CORS/CSRF policy, security headers, telemetry SDKs,
-OpenAPI, multipart, streaming bodies, or WebSockets. Optional bridges only
-compose contracts owned by the corresponding soaprs packages.
+rate-limit algorithms, CORS/CSRF enforcement, security engines, cache storage,
+telemetry SDKs, OpenAPI, multipart, streaming bodies, or WebSockets. Optional
+bridges compose contracts owned by the corresponding soaprs packages, while
+portable response-policy translation remains adapter boundary work.

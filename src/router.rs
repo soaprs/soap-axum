@@ -24,6 +24,7 @@ use soaprs_http::{
 use crate::{
     EndpointBinding, EndpointHook, EndpointMiddleware, EndpointNext, EndpointOutcome,
     NormalizedRequest, PluginContext, ResponseView, RouteRequest, RouteResponse, RouterPlugin,
+    policy::apply_response_policies,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -230,7 +231,14 @@ impl EndpointRuntime {
     async fn dispatch(&self, params: RawPathParams, request: Request<Body>) -> Response {
         let mut request = match self.normalize(params, request).await {
             Ok(request) => request,
-            Err(error) => return error_response(self.error_mapper.as_ref(), &error),
+            Err(error) => {
+                let mut response = error_response(self.error_mapper.as_ref(), &error);
+                if let Err(error) = apply_response_policies(&self.endpoint, response.headers_mut())
+                {
+                    return error_response(self.error_mapper.as_ref(), &error);
+                }
+                return response;
+            }
         };
         for hook in &self.hooks {
             hook.on_request(&request);
@@ -246,11 +254,14 @@ impl EndpointRuntime {
         for hook in &self.hooks {
             hook.on_outcome(&request, &outcome);
         }
-        let response = outcome_response(
+        let mut response = outcome_response(
             self.error_mapper.as_ref(),
             self.endpoint.success_status,
             outcome,
         );
+        if let Err(error) = apply_response_policies(&self.endpoint, response.headers_mut()) {
+            response = error_response(self.error_mapper.as_ref(), &error);
+        }
         let view = ResponseView::new(response.status(), response.headers());
         for hook in &self.hooks {
             hook.on_response(&request, view);

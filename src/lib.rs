@@ -11,6 +11,7 @@ mod binding;
 mod hook;
 mod middleware;
 mod plugin;
+mod policy;
 mod request;
 mod response;
 mod route_io;
