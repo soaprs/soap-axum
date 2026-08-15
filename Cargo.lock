@@ -386,6 +386,8 @@ dependencies = [
  "soaprs-auth-http",
  "soaprs-core",
  "soaprs-http",
+ "soaprs-rate-limit",
+ "soaprs-validation",
  "tokio",
  "tower",
 ]
@@ -401,6 +403,21 @@ dependencies = [
  "http",
  "soaprs-auth",
  "soaprs-core",
+]
+
+[[package]]
+name = "soaprs-rate-limit"
+version = "0.4.0"
+dependencies = [
+ "soaprs-core",
+]
+
+[[package]]
+name = "soaprs-validation"
+version = "0.4.0"
+dependencies = [
+ "soaprs-core",
+ "soaprs-http",
 ]
 
 [[package]]

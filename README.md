@@ -95,6 +95,36 @@ business rules.
 The middleware can be registered globally, by a `RouterPlugin`, or on a single
 `EndpointBinding`, using the same ordering rules as every other extension.
 
+## Optional capability bridges
+
+The `validation` feature provides `ValidationMiddleware<V>`. It passes the
+matched endpoint, normalized `HttpRequestView`, and already-buffered body to a
+`soaprs-validation::HttpValidationService`. Contract resolution and the actual
+validation engine remain application or provider code.
+
+The `rate-limit` feature provides `RateLimitMiddleware<L>`. It maps an
+endpoint's `RateLimitPolicy` to the runtime-neutral `soaprs-rate-limit` port.
+Allowed decisions continue the pipeline; rejected decisions become
+`SoapError::rate_limited`, HTTP 429, and a validated `Retry-After` response
+effect.
+
+`BuiltInRateLimitKeyResolver` handles global and trusted client-IP scopes.
+Principal, API-key, and custom scopes require `HttpRateLimitKeyResolver`, which
+can inspect application-owned typed request extensions such as `AuthContext`.
+Key composition therefore remains explicit and credential secrets never need
+to enter the neutral limiter.
+
+```toml
+soaprs-axum = {
+  version = "0.4",
+  features = ["auth", "validation", "rate-limit"]
+}
+```
+
+The capability repositories currently track the post-0.4 upstream contract;
+the workspace uses sibling checkouts until the next compatible soaprs release
+publishes `SoapErrorKind::RateLimited` and the two capability crates.
+
 ## Portable response policies
 
 The adapter translates `SecurityHeadersPolicy` and `ResponseCachePolicy` from
@@ -129,9 +159,10 @@ installed explicitly by boundary middleware.
 
 `tests/reference_application.rs` composes catalog registration, normalized
 path/query/header/body input, `RouteIo`, a pure `UseCase`, authentication,
-application-owned validation and rate-limit plugins, endpoint middleware,
-telemetry hooks, response effects, response policies, and a deadline. Its four
-requests prove ordered short-circuit behavior for 401, 422, 201, and 429.
+application-owned validator and limiter implementations through typed plugins,
+endpoint middleware, telemetry hooks, response effects, response policies, and
+a deadline. Its four requests prove ordered short-circuit behavior for 401,
+422, 201, and 429.
 
 ```console
 cargo test --all-features --test reference_application

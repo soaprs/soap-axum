@@ -1,9 +1,9 @@
 //! Acceptance test composing the complete first vertical slice.
 
-#![cfg(feature = "auth")]
+#![cfg(all(feature = "auth", feature = "rate-limit", feature = "validation"))]
 
 use std::{
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -28,15 +28,20 @@ use soaprs_auth::{
 use soaprs_auth_http::{BearerTokenExtractor, HttpAuthenticationService};
 use soaprs_axum::{
     AuthContext, AuthenticationMiddleware, EndpointBinding, EndpointHook, EndpointMiddleware,
-    EndpointNext, EndpointOutcome, JsonRouteIo, PluginContext, ResponseView, RouteRequest,
-    RouteResponse, RouterPlugin, SoapRouter,
+    EndpointNext, EndpointOutcome, HttpRateLimitKeyResolver, JsonRouteIo, PluginContext,
+    RateLimitMiddleware, ResponseView, RouteRequest, RouteResponse, RouterPlugin, SoapRouter,
+    ValidationMiddleware,
 };
 use soaprs_core::{BoxFuture, SoapError, SoapErrorKind, SoapResult, UseCase};
 use soaprs_http::{
     AuthChallenge, BodyLimitPolicy, ContractId, EndpointCatalog, EndpointId, EndpointMetadata,
-    HttpRequestView, HttpResponseEffects, MediaType, RequestContract, RequestContractLocation,
-    ResponseCachePolicy, ResponseCookie, RoutePath,
+    HttpRequestView, HttpResponseEffects, MediaType, RateLimitPolicy, RateLimitScope,
+    RequestContract, RequestContractLocation, ResponseCachePolicy, ResponseCookie, RoutePath,
 };
+use soaprs_rate_limit::{
+    RateLimitDecision, RateLimitKey, RateLimitRequest, RateLimitService, RateLimiter,
+};
+use soaprs_validation::{HttpRequestContractValidator, HttpValidationInput, HttpValidationService};
 use tower::ServiceExt;
 
 const ENDPOINT_ID: &str = "users.create.reference";
@@ -148,9 +153,9 @@ impl RouterPlugin for ValidationPlugin {
         }
         context.endpoint_middleware(
             ENDPOINT_ID,
-            ReferenceValidation {
+            ValidationMiddleware::new(HttpValidationService::new(ReferenceValidation {
                 calls: Arc::clone(&self.calls),
-            },
+            })),
         )
     }
 }
@@ -159,47 +164,72 @@ struct ReferenceValidation {
     calls: Arc<AtomicUsize>,
 }
 
-impl EndpointMiddleware for ReferenceValidation {
-    fn handle<'a>(
+impl HttpRequestContractValidator for ReferenceValidation {
+    fn validate<'a>(
         &'a self,
-        request: &'a mut RouteRequest,
-        next: EndpointNext<'a>,
-    ) -> BoxFuture<'a, EndpointOutcome> {
+        contract: &'a RequestContract,
+        input: HttpValidationInput<'a>,
+    ) -> BoxFuture<'a, SoapResult<()>> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let valid_boundary = request
-                .path_parameter("tenant")
-                .is_some_and(|value| !value.is_empty())
-                && request
-                    .query_parameters("notify")
-                    .is_some_and(|values| values == ["true"])
-                && request.headers().get("x-api-version") == Some(&HeaderValue::from_static("1"))
-                && request.headers().get(CONTENT_TYPE)
-                    == Some(&HeaderValue::from_static("application/json"));
-            if !valid_boundary {
-                return EndpointOutcome::failure(SoapError::validation(
-                    "reference request boundary is invalid",
-                ));
-            }
-            let body = match serde_json::from_slice::<serde_json::Value>(request.body()) {
-                Ok(body) => body,
-                Err(error) => {
-                    return EndpointOutcome::failure(
-                        SoapError::validation("reference body is not valid JSON")
-                            .with_source(error),
-                    );
+            match contract.location {
+                RequestContractLocation::Body => {
+                    if input.request().headers().get(CONTENT_TYPE)
+                        != Some(&HeaderValue::from_static("application/json"))
+                    {
+                        return Err(SoapError::validation(
+                            "reference body content type is invalid",
+                        ));
+                    }
+                    let body = serde_json::from_slice::<serde_json::Value>(input.body()).map_err(
+                        |error| {
+                            SoapError::validation("reference body is not valid JSON")
+                                .with_source(error)
+                        },
+                    )?;
+                    if !body
+                        .get("email")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|email| email.contains('@'))
+                    {
+                        return Err(SoapError::validation(
+                            "reference email contract rejected the request",
+                        ));
+                    }
                 }
-            };
-            if !body
-                .get("email")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|email| email.contains('@'))
-            {
-                return EndpointOutcome::failure(SoapError::validation(
-                    "reference email contract rejected the request",
-                ));
+                RequestContractLocation::Path => {
+                    if input
+                        .request()
+                        .path_parameter("tenant")
+                        .is_none_or(str::is_empty)
+                    {
+                        return Err(SoapError::validation(
+                            "reference tenant contract rejected the request",
+                        ));
+                    }
+                }
+                RequestContractLocation::Query => {
+                    if input
+                        .request()
+                        .query_parameters("notify")
+                        .is_none_or(|values| values != ["true"])
+                    {
+                        return Err(SoapError::validation(
+                            "reference query contract rejected the request",
+                        ));
+                    }
+                }
+                RequestContractLocation::Headers => {
+                    if input.request().headers().get("x-api-version")
+                        != Some(&HeaderValue::from_static("1"))
+                    {
+                        return Err(SoapError::validation(
+                            "reference header contract rejected the request",
+                        ));
+                    }
+                }
             }
-            next.run(request).await
+            Ok(())
         })
     }
 }
@@ -216,36 +246,60 @@ impl RouterPlugin for RateLimitPlugin {
     fn install(&self, context: &mut PluginContext<'_>) -> SoapResult<()> {
         context.endpoint_middleware(
             ENDPOINT_ID,
-            ReferenceRateLimit {
+            RateLimitMiddleware::new(RateLimitService::new(ReferenceRateLimiter {
                 attempts: Arc::clone(&self.attempts),
-            },
+            }))
+            .key_resolver(ReferencePrincipalKeyResolver),
         )
     }
 }
 
-struct ReferenceRateLimit {
+struct ReferenceRateLimiter {
     attempts: Arc<AtomicUsize>,
 }
 
-impl EndpointMiddleware for ReferenceRateLimit {
-    fn handle<'a>(
+impl RateLimiter for ReferenceRateLimiter {
+    fn check<'a>(
         &'a self,
-        request: &'a mut RouteRequest,
-        next: EndpointNext<'a>,
-    ) -> BoxFuture<'a, EndpointOutcome> {
+        request: RateLimitRequest<'a>,
+    ) -> BoxFuture<'a, SoapResult<RateLimitDecision>> {
         Box::pin(async move {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
-            if attempt > 1 {
-                let mut outcome = EndpointOutcome::success(
-                    RouteResponse::empty().status(StatusCode::TOO_MANY_REQUESTS),
-                );
-                outcome
-                    .effects_mut()
-                    .headers
-                    .insert(RETRY_AFTER, HeaderValue::from_static("60"));
-                return outcome;
+            if attempt <= request.rule().limit.get() as usize {
+                Ok(RateLimitDecision::allowed(
+                    Some(request.rule().limit.get() - attempt as u32),
+                    Some(request.rule().period),
+                ))
+            } else {
+                RateLimitDecision::rejected(request.rule().period)
             }
-            next.run(request).await
+        })
+    }
+}
+
+struct ReferencePrincipalKeyResolver;
+
+impl HttpRateLimitKeyResolver for ReferencePrincipalKeyResolver {
+    fn resolve<'a>(
+        &'a self,
+        policy: &'a RateLimitPolicy,
+        request: &'a RouteRequest,
+    ) -> BoxFuture<'a, SoapResult<RateLimitKey>> {
+        Box::pin(async move {
+            if policy.scope != RateLimitScope::Principal {
+                return Err(SoapError::validation(
+                    "reference resolver requires principal scope",
+                ));
+            }
+            let auth = request
+                .extensions()
+                .get::<AuthContext<StandardPrincipal>>()
+                .ok_or_else(SoapError::unauthorized)?;
+            RateLimitKey::new(format!(
+                "http:endpoint={}:principal={}",
+                request.endpoint().id,
+                auth.principal().principal_id()
+            ))
         })
     }
 }
@@ -340,6 +394,8 @@ fn application() -> SoapResult<ReferenceApplication> {
     let body_limit = NonZeroU64::new(4096)
         .ok_or_else(|| SoapError::infrastructure("reference body limit is zero"))?;
     let cache = ResponseCachePolicy::private(Duration::from_secs(30))?.vary(vec![AUTHORIZATION]);
+    let rate_limit = RateLimitPolicy::new(NonZeroU32::MIN, Duration::from_secs(60))?
+        .scope(RateLimitScope::Principal);
     let endpoint = EndpointMetadata::new(
         ENDPOINT_ID,
         Method::POST,
@@ -348,6 +404,7 @@ fn application() -> SoapResult<ReferenceApplication> {
     .success_status(StatusCode::CREATED)?
     .authorize(AuthorizationPolicy::Authenticated)?
     .body_limit(BodyLimitPolicy::new(body_limit))
+    .rate_limit(rate_limit)
     .timeout(Duration::from_secs(1))?
     .response_cache(cache)?
     .request_contract(
@@ -538,7 +595,7 @@ async fn composes_the_complete_vertical_slice_without_owning_external_capabiliti
         limited.headers().get(RETRY_AFTER),
         Some(&HeaderValue::from_static("60"))
     );
-    assert_eq!(application.validation_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(application.validation_calls.load(Ordering::SeqCst), 9);
     assert_eq!(application.rate_limit_attempts.load(Ordering::SeqCst), 2);
     assert_eq!(application.local_calls.load(Ordering::SeqCst), 1);
 
@@ -572,7 +629,7 @@ async fn composes_the_complete_vertical_slice_without_owning_external_capabiliti
             Some(SoapErrorKind::Unauthorized),
             Some(SoapErrorKind::Validation),
             None,
-            None,
+            Some(SoapErrorKind::RateLimited),
         ]
     );
     let responses = match application.telemetry.responses.lock() {

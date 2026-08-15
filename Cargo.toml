@@ -12,6 +12,8 @@ categories = ["web-programming::http-server"]
 [features]
 default = []
 auth = ["dep:soaprs-auth", "dep:soaprs-auth-http"]
+rate-limit = ["dep:soaprs-rate-limit"]
+validation = ["dep:soaprs-validation"]
 
 [dependencies]
 axum = "0.8"
@@ -24,6 +26,8 @@ soaprs-core = { version = "0.4.0", path = "../soaprs/crates/soaprs-core" }
 soaprs-http = { version = "0.4.0", path = "../soaprs/crates/soaprs-http" }
 soaprs-auth = { version = "0.4.0", path = "../soaprs/crates/soaprs-auth", optional = true }
 soaprs-auth-http = { version = "0.4.0", path = "../soaprs/crates/soaprs-auth-http", optional = true }
+soaprs-rate-limit = { version = "0.4.0", path = "../soap-rate-limit", optional = true }
+soaprs-validation = { version = "0.4.0", path = "../soap-validation", optional = true }
 tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
