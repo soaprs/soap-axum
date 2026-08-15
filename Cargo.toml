@@ -24,6 +24,7 @@ soaprs-core = { version = "0.4.0", path = "../soaprs/crates/soaprs-core" }
 soaprs-http = { version = "0.4.0", path = "../soaprs/crates/soaprs-http" }
 soaprs-auth = { version = "0.4.0", path = "../soaprs/crates/soaprs-auth", optional = true }
 soaprs-auth-http = { version = "0.4.0", path = "../soaprs/crates/soaprs-auth-http", optional = true }
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }

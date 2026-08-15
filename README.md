@@ -66,6 +66,10 @@ For ordinary application operations, direct `UseCase` binding is preferred.
 
 Middleware runs in registration order before the endpoint and unwinds in the
 opposite order afterwards. Global middleware wraps endpoint-local middleware.
+An endpoint `timeout` wraps the complete middleware and target invocation; a
+deadline is mapped through `SoapError::timeout` and remains observable by
+outcome and response hooks. Request-body normalization has its own size cap and
+happens before this invocation deadline.
 
 ## Optional authentication bridge
 

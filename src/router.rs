@@ -244,12 +244,22 @@ impl EndpointRuntime {
             hook.on_request(&request);
         }
 
-        let outcome = EndpointNext {
+        let invocation = EndpointNext {
             middleware: &self.middleware,
             target: self.target.as_ref(),
         }
-        .run(&mut request)
-        .await;
+        .run(&mut request);
+        let outcome = if let Some(timeout) = self.endpoint.timeout {
+            match tokio::time::timeout(timeout, invocation).await {
+                Ok(outcome) => outcome,
+                Err(_) => EndpointOutcome::failure(SoapError::timeout(format!(
+                    "endpoint `{}` request timed out",
+                    self.endpoint.id
+                ))),
+            }
+        } else {
+            invocation.await
+        };
 
         for hook in &self.hooks {
             hook.on_outcome(&request, &outcome);
