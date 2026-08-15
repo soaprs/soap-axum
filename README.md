@@ -66,6 +66,30 @@ For ordinary application operations, direct `UseCase` binding is preferred.
 Middleware runs in registration order before the endpoint and unwinds in the
 opposite order afterwards. Global middleware wraps endpoint-local middleware.
 
+## Optional authentication bridge
+
+The `auth` feature composes the framework-neutral contracts from `soaprs-auth`
+and `soaprs-auth-http` as ordinary endpoint middleware:
+
+```toml
+soaprs-axum = { version = "0.4", features = ["auth"] }
+```
+
+`AuthenticationMiddleware` delegates credential extraction and authentication
+to an `HttpAuthenticationService`, enforces the authorization policy declared
+in `EndpointMetadata`, and stores a typed `AuthContext<P>` in the normalized
+request extensions. `RouteIo` can map that principal into use-case input, so
+the use case remains independent of HTTP and Axum.
+
+The default evaluator handles soaprs identity, role, permission, strategy, and
+authenticated policies. Applications can provide `HttpAuthorization` when a
+named policy needs resource or tenant context. In particular, the adapter does
+not implement tokens, cryptography, sessions, user storage, or named-policy
+business rules.
+
+The middleware can be registered globally, by a `RouterPlugin`, or on a single
+`EndpointBinding`, using the same ordering rules as every other extension.
+
 ## Running the example
 
 ```console
@@ -73,6 +97,10 @@ cargo run --example vertical_slice
 curl -i -X POST http://127.0.0.1:3000/greetings/pl \
   -H 'content-type: application/json' \
   -d '{"name":"Ada"}'
+
+cargo run --features auth --example auth
+curl -i http://127.0.0.1:3001/profile \
+  -H 'authorization: Bearer demo-token'
 ```
 
 The default global encoded-body ceiling is 2 MiB. Endpoint `BodyLimitPolicy`
@@ -81,6 +109,7 @@ installed explicitly by boundary middleware.
 
 ## Deliberate first-slice exclusions
 
-The crate does not implement authentication, validation engines, rate-limit
-algorithms, CORS/CSRF policy, security headers, telemetry SDKs, OpenAPI,
-multipart, streaming bodies, or WebSockets.
+The crate does not implement authentication mechanisms, validation engines,
+rate-limit algorithms, CORS/CSRF policy, security headers, telemetry SDKs,
+OpenAPI, multipart, streaming bodies, or WebSockets. Optional bridges only
+compose contracts owned by the corresponding soaprs packages.

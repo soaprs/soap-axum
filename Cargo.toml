@@ -9,6 +9,10 @@ repository = "https://github.com/soaprs/soap-axum"
 keywords = ["axum", "soaprs", "http", "clean-architecture"]
 categories = ["web-programming::http-server"]
 
+[features]
+default = []
+auth = ["dep:soaprs-auth", "dep:soaprs-auth-http"]
+
 [dependencies]
 axum = "0.8"
 bytes = "1"
@@ -18,6 +22,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 soaprs-core = { version = "0.4.0", path = "../soaprs/crates/soaprs-core" }
 soaprs-http = { version = "0.4.0", path = "../soaprs/crates/soaprs-http" }
+soaprs-auth = { version = "0.4.0", path = "../soaprs/crates/soaprs-auth", optional = true }
+soaprs-auth-http = { version = "0.4.0", path = "../soaprs/crates/soaprs-auth-http", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }

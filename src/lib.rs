@@ -5,6 +5,8 @@
 //! [`RouteIo`] maps normalized HTTP requests into use-case input and successful
 //! use-case output back into a [`RouteResponse`].
 
+#[cfg(feature = "auth")]
+mod auth;
 mod binding;
 mod hook;
 mod middleware;
@@ -14,6 +16,8 @@ mod response;
 mod route_io;
 mod router;
 
+#[cfg(feature = "auth")]
+pub use auth::{AuthContext, AuthenticationMiddleware, BuiltInAuthorization, HttpAuthorization};
 pub use binding::{EndpointBinding, HandlerBinding, HttpHandler, UseCaseBinding};
 pub use hook::{EndpointHook, ResponseView};
 pub use middleware::{EndpointMiddleware, EndpointNext, EndpointOutcome};

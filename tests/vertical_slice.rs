@@ -149,6 +149,14 @@ impl RouterPlugin for TestPlugin {
         context.hook(RecordingHook {
             events: Arc::clone(&self.events),
         });
+        context.endpoint_middleware(
+            "users.create",
+            RecordingMiddleware {
+                name: "plugin-endpoint",
+                events: Arc::clone(&self.events),
+                tenant: None,
+            },
+        )?;
         Ok(())
     }
 }
@@ -298,8 +306,10 @@ async fn maps_http_to_pure_use_case_and_output_back_to_http() {
         [
             "hook.request",
             "global.before",
+            "plugin-endpoint.before",
             "endpoint.before",
             "endpoint.after",
+            "plugin-endpoint.after",
             "global.after",
             "hook.outcome.true",
             "hook.response.201",

@@ -363,6 +363,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "soaprs-auth-http"
+version = "0.4.0"
+dependencies = [
+ "http",
+ "soaprs-auth",
+ "soaprs-core",
+ "soaprs-http",
+]
+
+[[package]]
 name = "soaprs-axum"
 version = "0.4.0"
 dependencies = [
@@ -372,6 +382,8 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
+ "soaprs-auth",
+ "soaprs-auth-http",
  "soaprs-core",
  "soaprs-http",
  "tokio",
