@@ -20,29 +20,29 @@ Axum request
 
 ```rust
 # use std::sync::Arc;
-# use soaprs_axum::{EndpointBinding, JsonRouteIo, RouteRequest, RouteResponse};
+# use soaprs_axum::{EndpointBinding, JsonResponse, RouteRequest, TypedJsonRouteIo};
 # use soaprs_core::{BoxFuture, SoapResult, UseCase};
-# use soaprs_http::{EndpointMetadata, HttpRequestView};
-# use serde::Deserialize;
-# struct CreateBody { name: String }
-# impl<'de> Deserialize<'de> for CreateBody { fn deserialize<D>(_d: D) -> Result<Self, D::Error> where D: serde::Deserializer<'de> { unimplemented!() } }
-# struct CreateInput { name: String, tenant: String }
-# struct User;
+# use soaprs_http::EndpointMetadata;
+# use serde::{Deserialize, Serialize};
+# #[derive(Deserialize)] struct CreatePath { account_id: String }
+# #[derive(Deserialize)] struct CreateBody { name: String }
+# struct CreateInput { account_id: String, name: String, tenant_id: u64 }
+# struct User { id: String }
+# #[derive(Serialize)] struct CreatedBody { id: String }
 # struct CreateUser;
-# impl UseCase for CreateUser { type Input = CreateInput; type Output = User; fn execute(&self, _input: Self::Input) -> BoxFuture<'_, SoapResult<Self::Output>> { Box::pin(async { Ok(User) }) } }
-let route_io = JsonRouteIo::new(
+# impl UseCase for CreateUser { type Input = CreateInput; type Output = User; fn execute(&self, _input: Self::Input) -> BoxFuture<'_, SoapResult<Self::Output>> { Box::pin(async { Ok(User { id: "created".to_owned() }) }) } }
+let route_io = TypedJsonRouteIo::new(
     |request: &RouteRequest, body: CreateBody| {
+        let path: CreatePath = request.decode_path()?;
         Ok(CreateInput {
+            account_id: path.account_id,
             name: body.name,
-            tenant: request
-                .headers()
-                .get("x-tenant")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("public")
-                .to_owned(),
+            tenant_id: request.required_header("x-tenant-id")?,
         })
     },
-    |_user: User, _endpoint: &EndpointMetadata| RouteResponse::json(&"created"),
+    |user: User, _endpoint: &EndpointMetadata| {
+        Ok(JsonResponse::new(CreatedBody { id: user.id }))
+    },
 );
 
 let binding = EndpointBinding::use_case(Arc::new(CreateUser)).route_io(route_io);
@@ -51,6 +51,21 @@ let binding = EndpointBinding::use_case(Arc::new(CreateUser)).route_io(route_io)
 
 `HttpHandler` is available for operations that genuinely require HTTP context.
 For ordinary application operations, direct `UseCase` binding is preferred.
+
+## Typed RouteIO and HTTP semantics
+
+`RouteRequest::decode_path`, `decode_query`, `required_header`,
+`optional_header`, `header_values`, and `decode_json` keep transport parsing in
+the RouteIO mapper. `TypedJsonRouteIo` maps the use-case result into a typed
+`JsonResponse<T>`, so serialization and response metadata also remain outside
+business logic.
+
+JSON request decoding accepts `application/json` and structured `+json` media
+types. Typed JSON responses honor the `Accept` header. Protocol rejections are
+mapped before the application error mapper: malformed request data is 400,
+unacceptable response media is 406, an oversized encoded body is 413, and an
+unsupported request media type is 415. Structurally valid input that does not
+match the declared DTO remains a validation error (422).
 
 ## Extension model
 

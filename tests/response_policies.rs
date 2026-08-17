@@ -117,10 +117,7 @@ async fn secure_defaults_cover_success_application_errors_and_normalization_erro
 
     assert_eq!(success_response.status(), StatusCode::OK);
     assert_eq!(failure_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        normalization_response.status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
+    assert_eq!(normalization_response.status(), StatusCode::BAD_REQUEST);
     for response in [success_response, failure_response, normalization_response] {
         assert_eq!(
             response.headers().get(X_CONTENT_TYPE_OPTIONS),

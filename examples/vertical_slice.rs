@@ -4,9 +4,14 @@ use std::sync::Arc;
 
 use http::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
-use soaprs_axum::{EndpointBinding, JsonRouteIo, RouteRequest, RouteResponse, SoapRouter};
+use soaprs_axum::{EndpointBinding, JsonResponse, RouteRequest, SoapRouter, TypedJsonRouteIo};
 use soaprs_core::{BoxFuture, SoapResult, UseCase};
-use soaprs_http::{EndpointCatalog, EndpointMetadata, HttpRequestView, RoutePath};
+use soaprs_http::{EndpointCatalog, EndpointMetadata, RoutePath};
+
+#[derive(Deserialize)]
+struct GreetingPath {
+    language: String,
+}
 
 #[derive(Deserialize)]
 struct GreetingBody {
@@ -57,20 +62,18 @@ fn application() -> SoapResult<axum::Router> {
     let mut catalog = EndpointCatalog::new();
     catalog.register(endpoint)?;
 
-    let route_io = JsonRouteIo::new(
+    let route_io = TypedJsonRouteIo::new(
         |request: &RouteRequest, body: GreetingBody| {
+            let path: GreetingPath = request.decode_path()?;
             Ok(GreetInput {
                 name: body.name.trim().to_owned(),
-                language: request
-                    .path_parameter("language")
-                    .unwrap_or("en")
-                    .to_owned(),
+                language: path.language,
             })
         },
         |output: GreetOutput, _endpoint: &EndpointMetadata| {
-            RouteResponse::json(&GreetingResponse {
+            Ok(JsonResponse::new(GreetingResponse {
                 message: output.message,
-            })
+            }))
         },
     );
     let binding = EndpointBinding::use_case(Arc::new(Greet)).route_io(route_io);

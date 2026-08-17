@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Typed path and query DTO decoding, typed required/optional/repeated header
+  parsing, and JSON body decoding on `RouteRequest`.
+- `TypedJsonRouteIo` and `JsonResponse<T>` for request-to-input and
+  output-to-response mapping without serialization logic in handlers or use
+  cases.
+- Safe adapter-owned `HttpRejection` mapping for malformed requests (400),
+  unacceptable JSON responses (406), oversized bodies (413), and unsupported
+  JSON request media types (415).
+
+### Changed
+
+- `JsonRouteIo` now enforces JSON request content types and distinguishes
+  malformed JSON syntax from structurally valid validation failures.
+
 ## [0.5.0] - 2026-08-15
 
 ### Added

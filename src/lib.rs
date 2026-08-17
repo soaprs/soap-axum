@@ -14,6 +14,7 @@ mod plugin;
 mod policy;
 #[cfg(feature = "rate-limit")]
 mod rate_limit;
+mod rejection;
 mod request;
 mod response;
 mod route_io;
@@ -29,9 +30,10 @@ pub use middleware::{EndpointMiddleware, EndpointNext, EndpointOutcome};
 pub use plugin::{PluginContext, RouterPlugin};
 #[cfg(feature = "rate-limit")]
 pub use rate_limit::{BuiltInRateLimitKeyResolver, HttpRateLimitKeyResolver, RateLimitMiddleware};
+pub use rejection::HttpRejection;
 pub use request::{NormalizedRequest, RouteRequest};
-pub use response::RouteResponse;
-pub use route_io::{EmptyRouteIo, JsonRouteIo, RouteIo};
+pub use response::{JsonResponse, RouteResponse};
+pub use route_io::{EmptyRouteIo, JsonRouteIo, RouteIo, TypedJsonRouteIo};
 pub use router::{SoapRouter, SoapRouterBuilder};
 #[cfg(feature = "validation")]
 pub use validation::ValidationMiddleware;

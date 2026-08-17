@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    error::Error,
     sync::Arc,
 };
 
@@ -14,17 +15,18 @@ use axum::{
     routing::{MethodFilter, on},
 };
 use http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE};
+use http_body_util::LengthLimitError;
 use serde::Serialize;
 use soaprs_core::{SoapError, SoapResult};
 use soaprs_http::{
     EndpointCatalog, EndpointId, EndpointMetadata, HttpErrorBody, HttpErrorMapper,
-    HttpResponseEffects, ResponseCookie, SameSite,
+    HttpErrorResponse, HttpResponseEffects, ResponseCookie, SameSite,
 };
 
 use crate::{
     EndpointBinding, EndpointHook, EndpointMiddleware, EndpointNext, EndpointOutcome,
-    NormalizedRequest, PluginContext, ResponseView, RouteRequest, RouteResponse, RouterPlugin,
-    policy::apply_response_policies,
+    HttpRejection, NormalizedRequest, PluginContext, ResponseView, RouteRequest, RouteResponse,
+    RouterPlugin, policy::apply_response_policies,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -298,8 +300,15 @@ impl EndpointRuntime {
             .unwrap_or(self.max_body_bytes);
         let limit = endpoint_limit.min(self.max_body_bytes);
         let body = to_bytes(body, limit).await.map_err(|error| {
-            SoapError::validation(format!("request body exceeds the {limit}-byte limit"))
+            if Error::source(&error).is_some_and(|source| source.is::<LengthLimitError>()) {
+                HttpRejection::payload_too_large(format!(
+                    "request body exceeds the {limit}-byte limit"
+                ))
                 .with_source(error)
+                .into_error()
+            } else {
+                SoapError::infrastructure("failed to read HTTP request body").with_source(error)
+            }
         })?;
         let normalized = NormalizedRequest::new(
             parts.method,
@@ -334,27 +343,30 @@ fn parse_query(query: Option<&str>) -> BTreeMap<String, Vec<String>> {
 fn parse_cookies(headers: &HeaderMap) -> SoapResult<BTreeMap<String, String>> {
     let mut cookies = BTreeMap::new();
     for header in headers.get_all(COOKIE) {
-        let header = header
-            .to_str()
-            .map_err(|_| SoapError::validation("Cookie header is not valid ASCII"))?;
+        let header = header.to_str().map_err(|error| {
+            HttpRejection::bad_request("Cookie header is not valid visible text")
+                .with_source(error)
+                .into_error()
+        })?;
         for pair in header.split(';') {
             let pair = pair.trim();
             if pair.is_empty() {
                 continue;
             }
             let Some((name, value)) = pair.split_once('=') else {
-                return Err(SoapError::validation("malformed Cookie header"));
+                return Err(HttpRejection::bad_request("malformed Cookie header").into_error());
             };
             let name = name.trim();
             let value = value.trim();
             if !valid_cookie_name(name) || value.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
             {
-                return Err(SoapError::validation("invalid cookie name or value"));
+                return Err(HttpRejection::bad_request("invalid cookie name or value").into_error());
             }
             if cookies.insert(name.to_owned(), value.to_owned()).is_some() {
-                return Err(SoapError::validation(format!(
+                return Err(HttpRejection::bad_request(format!(
                     "duplicate request cookie `{name}`"
-                )));
+                ))
+                .into_error());
             }
         }
     }
@@ -428,7 +440,21 @@ struct SerializableErrorBody<'a> {
 }
 
 fn error_response(mapper: &dyn HttpErrorMapper, error: &SoapError) -> Response {
-    let mapped = mapper.map_error(error);
+    let mapped = if let Some(rejection) = HttpRejection::find(error) {
+        HttpErrorResponse {
+            status: rejection.status(),
+            body: HttpErrorBody {
+                code: rejection.code().to_owned(),
+                message: rejection.message().to_owned(),
+                diagnostic_id: error
+                    .diagnostic_id()
+                    .map(|diagnostic_id| diagnostic_id.as_str().to_owned()),
+            },
+            headers: HeaderMap::new(),
+        }
+    } else {
+        mapper.map_error(error)
+    };
     let body = serialize_error_body(&mapped.body);
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = mapped.status;

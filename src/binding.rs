@@ -29,9 +29,9 @@ where
                 Err(error) => return EndpointOutcome::failure(error),
             };
             match self.use_case.execute(input).await {
-                Ok(output) => EndpointOutcome::from_result(
-                    self.route_io.map_response(output, request.endpoint()),
-                ),
+                Ok(output) => {
+                    EndpointOutcome::from_result(self.route_io.map_response_for(output, request))
+                }
                 Err(error) => EndpointOutcome::failure(error),
             }
         })
@@ -73,9 +73,9 @@ where
                 Err(error) => return EndpointOutcome::failure(error),
             };
             match self.handler.handle(request, input).await {
-                Ok(output) => EndpointOutcome::from_result(
-                    self.route_io.map_response(output, request.endpoint()),
-                ),
+                Ok(output) => {
+                    EndpointOutcome::from_result(self.route_io.map_response_for(output, request))
+                }
                 Err(error) => EndpointOutcome::failure(error),
             }
         })

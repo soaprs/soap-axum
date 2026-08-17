@@ -3,9 +3,15 @@
 use std::{collections::BTreeMap, fmt, net::IpAddr, sync::Arc};
 
 use bytes::Bytes;
-use http::{Extensions, HeaderMap, Method, Uri};
+use http::{
+    Extensions, HeaderMap, Method, Uri,
+    header::{ACCEPT, CONTENT_TYPE},
+};
+use serde::de::DeserializeOwned;
 use soaprs_core::MessageId;
 use soaprs_http::{EndpointMetadata, HttpRequestView};
+
+use crate::HttpRejection;
 
 /// Framework-normalized request data exposed to middleware and route I/O.
 pub struct NormalizedRequest {
@@ -166,6 +172,128 @@ impl RouteRequest {
         self.normalized.body()
     }
 
+    /// Deserializes normalized path parameters into a transport DTO.
+    pub fn decode_path<T>(&self) -> soaprs_core::SoapResult<T>
+    where
+        T: DeserializeOwned,
+    {
+        let encoded =
+            serde_urlencoded::to_string(&self.normalized.path_parameters).map_err(|error| {
+                HttpRejection::bad_request("failed to normalize path parameters")
+                    .with_source(error)
+                    .into_error()
+            })?;
+        serde_urlencoded::from_str(&encoded).map_err(|error| {
+            HttpRejection::bad_request("path parameters do not match the expected shape")
+                .with_source(error)
+                .into_error()
+        })
+    }
+
+    /// Deserializes normalized query parameters into a transport DTO.
+    pub fn decode_query<T>(&self) -> soaprs_core::SoapResult<T>
+    where
+        T: DeserializeOwned,
+    {
+        let mut serializer = form_urlencoded::Serializer::new(String::new());
+        for (name, values) in &self.normalized.query_parameters {
+            for value in values {
+                serializer.append_pair(name, value);
+            }
+        }
+        serde_urlencoded::from_str(&serializer.finish()).map_err(|error| {
+            HttpRejection::bad_request("query parameters do not match the expected shape")
+                .with_source(error)
+                .into_error()
+        })
+    }
+
+    /// Parses one optional, non-repeated request header into a typed value.
+    pub fn optional_header<T>(&self, name: &str) -> soaprs_core::SoapResult<Option<T>>
+    where
+        T: std::str::FromStr,
+    {
+        let mut values = self.normalized.headers.get_all(name).iter();
+        let Some(value) = values.next() else {
+            return Ok(None);
+        };
+        if values.next().is_some() {
+            return Err(HttpRejection::bad_request(format!(
+                "request header `{name}` must not be repeated"
+            ))
+            .into_error());
+        }
+        let value = value.to_str().map_err(|error| {
+            HttpRejection::bad_request(format!("request header `{name}` is not valid visible text"))
+                .with_source(error)
+                .into_error()
+        })?;
+        value.parse::<T>().map(Some).map_err(|_| {
+            HttpRejection::bad_request(format!(
+                "request header `{name}` does not match the expected type"
+            ))
+            .into_error()
+        })
+    }
+
+    /// Parses one required, non-repeated request header into a typed value.
+    pub fn required_header<T>(&self, name: &str) -> soaprs_core::SoapResult<T>
+    where
+        T: std::str::FromStr,
+    {
+        self.optional_header(name)?.ok_or_else(|| {
+            HttpRejection::bad_request(format!("required request header `{name}` is missing"))
+                .into_error()
+        })
+    }
+
+    /// Parses every value of a repeated request header into typed values.
+    pub fn header_values<T>(&self, name: &str) -> soaprs_core::SoapResult<Vec<T>>
+    where
+        T: std::str::FromStr,
+    {
+        self.normalized
+            .headers
+            .get_all(name)
+            .iter()
+            .map(|value| {
+                let value = value.to_str().map_err(|error| {
+                    HttpRejection::bad_request(format!(
+                        "request header `{name}` is not valid visible text"
+                    ))
+                    .with_source(error)
+                    .into_error()
+                })?;
+                value.parse::<T>().map_err(|_| {
+                    HttpRejection::bad_request(format!(
+                        "request header `{name}` does not match the expected type"
+                    ))
+                    .into_error()
+                })
+            })
+            .collect()
+    }
+
+    /// Decodes a JSON request body after enforcing a JSON `Content-Type`.
+    pub fn decode_json<T>(&self) -> soaprs_core::SoapResult<T>
+    where
+        T: DeserializeOwned,
+    {
+        self.require_json_content_type()?;
+        serde_json::from_slice(self.body()).map_err(|error| {
+            if error.is_syntax() || error.is_eof() {
+                HttpRejection::bad_request("request body contains malformed JSON")
+                    .with_source(error)
+                    .into_error()
+            } else {
+                soaprs_core::SoapError::validation(
+                    "JSON request body does not match the expected shape",
+                )
+                .with_source(error)
+            }
+        })
+    }
+
     /// Returns typed per-request extensions populated by HTTP middleware.
     pub fn extensions(&self) -> &Extensions {
         &self.extensions
@@ -174,6 +302,113 @@ impl RouteRequest {
     /// Returns typed per-request extensions mutably.
     pub fn extensions_mut(&mut self) -> &mut Extensions {
         &mut self.extensions
+    }
+
+    pub(crate) fn require_json_acceptable(&self) -> soaprs_core::SoapResult<()> {
+        let values = self.normalized.headers.get_all(ACCEPT);
+        if values.iter().next().is_none() {
+            return Ok(());
+        }
+        for value in values {
+            let value = value.to_str().map_err(|error| {
+                HttpRejection::bad_request("Accept header is not valid visible text")
+                    .with_source(error)
+                    .into_error()
+            })?;
+            if accept_value_allows_json(value)? {
+                return Ok(());
+            }
+        }
+        Err(
+            HttpRejection::not_acceptable("client does not accept an application/json response")
+                .into_error(),
+        )
+    }
+
+    fn require_json_content_type(&self) -> soaprs_core::SoapResult<()> {
+        let mut values = self.normalized.headers.get_all(CONTENT_TYPE).iter();
+        let Some(value) = values.next() else {
+            return Err(HttpRejection::unsupported_media_type(
+                "JSON request requires Content-Type: application/json",
+            )
+            .into_error());
+        };
+        if values.next().is_some() {
+            return Err(HttpRejection::bad_request(
+                "request must contain exactly one Content-Type header",
+            )
+            .into_error());
+        }
+        let value = value.to_str().map_err(|error| {
+            HttpRejection::unsupported_media_type("request Content-Type is not valid text")
+                .with_source(error)
+                .into_error()
+        })?;
+        let essence = value.split(';').next().unwrap_or_default().trim();
+        let Some((kind, subtype)) = essence.split_once('/') else {
+            return Err(HttpRejection::unsupported_media_type(
+                "request Content-Type is not a JSON media type",
+            )
+            .into_error());
+        };
+        if !kind.eq_ignore_ascii_case("application")
+            || !(subtype.eq_ignore_ascii_case("json")
+                || subtype.to_ascii_lowercase().ends_with("+json"))
+        {
+            return Err(HttpRejection::unsupported_media_type(
+                "request Content-Type is not a JSON media type",
+            )
+            .into_error());
+        }
+        Ok(())
+    }
+}
+
+fn accept_value_allows_json(value: &str) -> soaprs_core::SoapResult<bool> {
+    for item in value.split(',') {
+        let mut segments = item.trim().split(';');
+        let range = segments.next().unwrap_or_default().trim();
+        let Some((kind, subtype)) = range.split_once('/') else {
+            return Err(HttpRejection::bad_request(
+                "Accept header contains an invalid media range",
+            )
+            .into_error());
+        };
+        let mut allowed = true;
+        for parameter in segments {
+            let parameter = parameter.trim();
+            let Some((name, value)) = parameter.split_once('=') else {
+                return Err(HttpRejection::bad_request(
+                    "Accept header contains an invalid parameter",
+                )
+                .into_error());
+            };
+            if name.trim().eq_ignore_ascii_case("q") {
+                allowed = parse_quality(value.trim()).ok_or_else(|| {
+                    HttpRejection::bad_request("Accept header contains an invalid quality value")
+                        .into_error()
+                })?;
+            }
+        }
+        if allowed
+            && (kind == "*" || kind.eq_ignore_ascii_case("application"))
+            && (subtype == "*" || subtype.eq_ignore_ascii_case("json"))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn parse_quality(value: &str) -> Option<bool> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    match whole {
+        "0" => Some(fraction.bytes().any(|byte| byte != b'0')),
+        "1" if fraction.bytes().all(|byte| byte == b'0') => Some(true),
+        _ => None,
     }
 }
 

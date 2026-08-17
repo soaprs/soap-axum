@@ -6,6 +6,74 @@ use serde::Serialize;
 use soaprs_core::{SoapError, SoapResult};
 use soaprs_http::HttpResponseEffects;
 
+/// Typed JSON response DTO plus HTTP-specific response metadata.
+///
+/// Route I/O maps application output into this boundary type. Serialization
+/// remains inside the adapter, so use-case output does not implement an HTTP
+/// response trait or depend on Axum.
+#[derive(Debug, Clone)]
+pub struct JsonResponse<T> {
+    value: T,
+    status: Option<StatusCode>,
+    headers: HeaderMap,
+    effects: HttpResponseEffects,
+}
+
+impl<T> JsonResponse<T> {
+    /// Creates a JSON response around one serializable transport DTO.
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            status: None,
+            headers: HeaderMap::new(),
+            effects: HttpResponseEffects::new(),
+        }
+    }
+
+    /// Overrides the endpoint's declared success status.
+    #[must_use]
+    pub const fn status(mut self, status: StatusCode) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Inserts or replaces one response header.
+    #[must_use]
+    pub fn header(mut self, name: http::HeaderName, value: HeaderValue) -> Self {
+        self.headers.insert(name, value);
+        self
+    }
+
+    /// Attaches validated portable response effects.
+    pub fn effects(mut self, effects: HttpResponseEffects) -> SoapResult<Self> {
+        effects.validate()?;
+        self.effects = effects;
+        Ok(self)
+    }
+
+    /// Returns the transport response DTO before serialization.
+    pub const fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub(crate) fn into_route_response(self) -> SoapResult<RouteResponse>
+    where
+        T: Serialize,
+    {
+        let body = serde_json::to_vec(&self.value).map_err(|error| {
+            SoapError::infrastructure("failed to serialize HTTP response").with_source(error)
+        })?;
+        let mut headers = self.headers;
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        Ok(RouteResponse {
+            status: self.status,
+            headers,
+            body: Bytes::from(body),
+            effects: self.effects,
+        })
+    }
+}
+
 /// Serialized successful response before conversion into an Axum response.
 #[derive(Debug, Clone)]
 pub struct RouteResponse {
