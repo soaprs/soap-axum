@@ -183,6 +183,15 @@ a deadline. Its four requests prove ordered short-circuit behavior for 401,
 cargo test --all-features --test reference_application
 ```
 
+`tests/shared_http_contract.rs` also runs the framework-neutral conformance
+suite from `soaprs-contract-tests` against a real Axum `Router`. This keeps the
+observable HTTP semantics shared with future adapters while leaving their
+framework-specific harness construction local:
+
+```console
+cargo test --test shared_http_contract
+```
+
 ## Deliberate first-slice exclusions
 
 The crate does not implement authentication mechanisms, validation engines,
