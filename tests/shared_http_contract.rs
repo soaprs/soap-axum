@@ -151,10 +151,7 @@ struct AxumHarness {
 }
 
 impl HttpAdapterHarness for AxumHarness {
-    fn execute<'a>(
-        &'a self,
-        request: Request<Vec<u8>>,
-    ) -> BoxFuture<'a, SoapResult<Response<Vec<u8>>>> {
+    fn execute(&self, request: Request<Vec<u8>>) -> BoxFuture<'_, SoapResult<Response<Vec<u8>>>> {
         Box::pin(async move {
             let (parts, body) = request.into_parts();
             let request = Request::from_parts(parts, Body::from(body));
