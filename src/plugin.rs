@@ -30,7 +30,8 @@ pub struct PluginContext<'a> {
     pub(crate) global_hooks: &'a mut Vec<Arc<dyn EndpointHook>>,
     pub(crate) endpoint_middleware: &'a mut HashMap<EndpointId, Vec<Arc<dyn EndpointMiddleware>>>,
     pub(crate) endpoint_hooks: &'a mut HashMap<EndpointId, Vec<Arc<dyn EndpointHook>>>,
-    pub(crate) router_transforms: &'a mut Vec<RouterTransform>,
+    pub(crate) router_augmentations: &'a mut Vec<RouterTransform>,
+    pub(crate) router_wrappers: &'a mut Vec<RouterTransform>,
     pub(crate) router_enforcement_capabilities: &'a mut HashSet<HttpEnforcementCapability>,
 }
 
@@ -56,17 +57,27 @@ impl PluginContext<'_> {
         self.global_hooks.push(Arc::new(hook));
     }
 
-    /// Applies one framework-level transformation after catalog routes have
-    /// been built.
+    /// Adds framework-level routes after catalog routes have been built and
+    /// before outer wrappers are applied.
     ///
-    /// This extension point is intended for behavior that cannot run inside a
-    /// matched endpoint pipeline, including CORS preflight routes and outer
-    /// telemetry layers.
-    pub fn transform_router<F>(&mut self, transform: F)
+    /// This extension point is intended for behavior such as CORS preflight
+    /// that cannot run inside a matched endpoint pipeline.
+    pub fn augment_router<F>(&mut self, augmentation: F)
     where
         F: Fn(Router) -> SoapResult<Router> + Send + Sync + 'static,
     {
-        self.router_transforms.push(Box::new(transform));
+        self.router_augmentations.push(Box::new(augmentation));
+    }
+
+    /// Wraps the router after catalog routes and every augmentation exist.
+    ///
+    /// This guarantees that outer telemetry or policy layers also observe
+    /// routes contributed by other plugins regardless of installation order.
+    pub fn wrap_router<F>(&mut self, wrapper: F)
+    where
+        F: Fn(Router) -> SoapResult<Router> + Send + Sync + 'static,
+    {
+        self.router_wrappers.push(Box::new(wrapper));
     }
 
     /// Declares enforcement provided at the framework-router level.

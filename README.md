@@ -76,9 +76,10 @@ match the declared DTO remains a validation error (422).
 - `EndpointHook` observes request, outcome, and final response lifecycle events.
 - `EndpointHook::on_normalization_rejection` observes matched requests rejected
   before a complete `RouteRequest` can be created.
-- `RouterPlugin` installs middleware and hooks at build time and can transform
-  the completed native router for preflight routes or outer telemetry layers.
-  The adapter does not own server startup or shutdown.
+- `RouterPlugin` installs middleware and hooks at build time. `augment_router`
+  adds preflight or other framework-level routes first; `wrap_router` then
+  applies outer telemetry/policy layers around every catalog and contributed
+  route. The adapter does not own server startup or shutdown.
 - Auth, validation, rate limiting, security, and telemetry implementations live
   in separate packages and plug into these extension points.
 
@@ -175,7 +176,22 @@ curl -i -X POST http://127.0.0.1:3000/greetings/pl \
 cargo run --features auth --example auth
 curl -i http://127.0.0.1:3001/profile \
   -H 'authorization: Bearer demo-token'
+
+cargo run --example security_telemetry
+curl -i -X OPTIONS http://127.0.0.1:3002/notes \
+  -H 'origin: http://localhost:3001'
+curl -i -X POST http://127.0.0.1:3002/notes \
+  -H 'origin: http://localhost:3001' \
+  -H 'content-type: application/json' \
+  -H 'x-csrf-token: demo' \
+  -d '{"text":"separated boundary"}'
 ```
+
+`security_telemetry` keeps the example CORS/CSRF enforcement and console
+telemetry in application-owned extensions. It demonstrates router-level
+preflight/outer-response composition, endpoint-local enforcement, lifecycle
+hooks, typed RouteIO, and a transport-independent use case without moving those
+capabilities into `soaprs-axum`.
 
 The default global encoded-body ceiling is 2 MiB. Endpoint `BodyLimitPolicy`
 can lower it. Trusted proxy processing and request-ID generation must be

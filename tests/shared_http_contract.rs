@@ -218,6 +218,7 @@ fn harness() -> SoapResult<AxumHarness> {
         },
         |output: CreatedWidget, _endpoint: &EndpointMetadata| {
             let effects = HttpResponseEffects::new()
+                .status(StatusCode::CREATED)
                 .cookie(ResponseCookie::new("contract_session", "rotated")?)?;
             JsonResponse::new(CreatedWidgetBody {
                 id: output.id,
@@ -227,7 +228,6 @@ fn harness() -> SoapResult<AxumHarness> {
                 session: output.session,
                 trace_values: output.trace_values,
             })
-            .status(StatusCode::CREATED)
             .header(
                 HeaderName::from_static("x-contract-output"),
                 HeaderValue::from_static("mapped"),

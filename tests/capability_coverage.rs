@@ -110,7 +110,7 @@ impl RouterPlugin for CorsRouterPlugin {
 
     fn install(&self, context: &mut PluginContext<'_>) -> SoapResult<()> {
         context.router_enforcement_capability(HttpEnforcementCapability::Cors);
-        context.transform_router(|router| {
+        context.augment_router(|router| {
             Ok(router.route("/covered", options(|| async { StatusCode::NO_CONTENT })))
         });
         Ok(())
@@ -128,7 +128,7 @@ impl RouterPlugin for OuterTelemetryPlugin {
 
     fn install(&self, context: &mut PluginContext<'_>) -> SoapResult<()> {
         let statuses = Arc::clone(&self.statuses);
-        context.transform_router(move |router| {
+        context.wrap_router(move |router| {
             let statuses = Arc::clone(&statuses);
             Ok(
                 router.layer(from_fn(move |request: Request<Body>, next: Next| {
@@ -190,11 +190,15 @@ fn build_requires_an_explicit_opt_out_for_externally_enforced_metadata() {
 
 #[tokio::test]
 async fn router_plugin_can_cover_preflight_while_endpoint_middleware_covers_the_pipeline() {
+    let statuses = Arc::new(Mutex::new(Vec::new()));
     let endpoint =
         protected_endpoint().unwrap_or_else(|error| panic!("valid protected endpoint: {error}"));
     let catalog = catalog(endpoint).unwrap_or_else(|error| panic!("valid catalog: {error}"));
     let app = SoapRouter::builder(catalog)
-        .plugin(CorsRouterPlugin)
+        .plugin(OuterTelemetryPlugin {
+            statuses: Arc::clone(&statuses),
+        })
+        .and_then(|builder| builder.plugin(CorsRouterPlugin))
         .and_then(|builder| builder.bind(ENDPOINT_ID, binding().middleware(EndpointEnforcement)))
         .and_then(|builder| builder.build())
         .unwrap_or_else(|error| panic!("covered router must build: {error}"));
@@ -209,6 +213,13 @@ async fn router_plugin_can_cover_preflight_while_endpoint_middleware_covers_the_
         .await
         .unwrap_or_else(|error| panic!("preflight response: {error}"));
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        statuses
+            .lock()
+            .unwrap_or_else(|error| panic!("preflight telemetry lock: {error}"))
+            .as_slice(),
+        [StatusCode::NO_CONTENT]
+    );
 }
 
 #[tokio::test]

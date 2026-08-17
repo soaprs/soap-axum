@@ -51,7 +51,8 @@ pub struct SoapRouterBuilder {
     global_hooks: Vec<Arc<dyn EndpointHook>>,
     endpoint_middleware: HashMap<EndpointId, Vec<Arc<dyn EndpointMiddleware>>>,
     endpoint_hooks: HashMap<EndpointId, Vec<Arc<dyn EndpointHook>>>,
-    router_transforms: Vec<RouterTransform>,
+    router_augmentations: Vec<RouterTransform>,
+    router_wrappers: Vec<RouterTransform>,
     router_enforcement_capabilities: HashSet<HttpEnforcementCapability>,
     allowed_unenforced_capabilities: HashMap<EndpointId, HashSet<HttpEnforcementCapability>>,
     plugins: HashSet<String>,
@@ -68,7 +69,8 @@ impl SoapRouterBuilder {
             global_hooks: Vec::new(),
             endpoint_middleware: HashMap::new(),
             endpoint_hooks: HashMap::new(),
-            router_transforms: Vec::new(),
+            router_augmentations: Vec::new(),
+            router_wrappers: Vec::new(),
             router_enforcement_capabilities: HashSet::new(),
             allowed_unenforced_capabilities: HashMap::new(),
             plugins: HashSet::new(),
@@ -130,7 +132,8 @@ impl SoapRouterBuilder {
             global_hooks: &mut self.global_hooks,
             endpoint_middleware: &mut self.endpoint_middleware,
             endpoint_hooks: &mut self.endpoint_hooks,
-            router_transforms: &mut self.router_transforms,
+            router_augmentations: &mut self.router_augmentations,
+            router_wrappers: &mut self.router_wrappers,
             router_enforcement_capabilities: &mut self.router_enforcement_capabilities,
         };
         plugin.install(&mut context)?;
@@ -255,8 +258,11 @@ impl SoapRouterBuilder {
                 ),
             );
         }
-        for transform in self.router_transforms {
-            router = transform(router)?;
+        for augmentation in self.router_augmentations {
+            router = augmentation(router)?;
+        }
+        for wrapper in self.router_wrappers {
+            router = wrapper(router)?;
         }
         Ok(router)
     }

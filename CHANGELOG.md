@@ -23,10 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fail-closed runtime capability coverage for declared authentication,
   validation, rate-limit, CORS, and CSRF policies, with an explicit
   `allow_unenforced` escape hatch for externally enforced metadata.
-- Router-level plugin transformations for preflight routes and outer layers,
-  plus lifecycle observation of request-normalization rejections.
+- Deterministic router-level plugin phases: augmentations add preflight routes
+  before wrappers apply outer policy/telemetry layers to every route, plus
+  lifecycle observation of request-normalization rejections.
 - Strict query percent-encoding and UTF-8 validation and RFC cookie-octet
   parsing, including quoted request-cookie values.
+- A runnable `security_telemetry` example with application-owned CORS preflight,
+  CSRF enforcement, outer response observation, typed RouteIO, and a pure use
+  case.
 
 ### Changed
 
