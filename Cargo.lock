@@ -381,6 +381,7 @@ dependencies = [
  "form_urlencoded",
  "http",
  "http-body-util",
+ "percent-encoding",
  "serde",
  "serde_json",
  "serde_urlencoded",

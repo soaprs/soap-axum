@@ -131,6 +131,15 @@ struct RecordingHook {
 }
 
 impl EndpointHook for RecordingHook {
+    fn on_normalization_rejection(
+        &self,
+        _endpoint: &EndpointMetadata,
+        _error: &SoapError,
+        _response: ResponseView<'_>,
+    ) {
+        record(&self.events, "hook.normalization_rejection");
+    }
+
     fn on_request(&self, _request: &RouteRequest) {
         record(&self.events, "hook.request");
     }

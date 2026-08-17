@@ -16,17 +16,18 @@ use axum::{
 };
 use http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE};
 use http_body_util::LengthLimitError;
+use percent_encoding::percent_decode_str;
 use serde::Serialize;
 use soaprs_core::{SoapError, SoapResult};
 use soaprs_http::{
-    EndpointCatalog, EndpointId, EndpointMetadata, HttpErrorBody, HttpErrorMapper,
-    HttpErrorResponse, HttpResponseEffects, ResponseCookie, SameSite,
+    EndpointCatalog, EndpointId, EndpointMetadata, HttpEnforcementCapability, HttpErrorBody,
+    HttpErrorMapper, HttpErrorResponse, HttpResponseEffects, ResponseCookie, SameSite,
 };
 
 use crate::{
     EndpointBinding, EndpointHook, EndpointMiddleware, EndpointNext, EndpointOutcome,
     HttpRejection, NormalizedRequest, PluginContext, ResponseView, RouteRequest, RouteResponse,
-    RouterPlugin, policy::apply_response_policies,
+    RouterPlugin, plugin::RouterTransform, policy::apply_response_policies,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -50,6 +51,9 @@ pub struct SoapRouterBuilder {
     global_hooks: Vec<Arc<dyn EndpointHook>>,
     endpoint_middleware: HashMap<EndpointId, Vec<Arc<dyn EndpointMiddleware>>>,
     endpoint_hooks: HashMap<EndpointId, Vec<Arc<dyn EndpointHook>>>,
+    router_transforms: Vec<RouterTransform>,
+    router_enforcement_capabilities: HashSet<HttpEnforcementCapability>,
+    allowed_unenforced_capabilities: HashMap<EndpointId, HashSet<HttpEnforcementCapability>>,
     plugins: HashSet<String>,
     error_mapper: Arc<dyn HttpErrorMapper>,
     max_body_bytes: usize,
@@ -64,6 +68,9 @@ impl SoapRouterBuilder {
             global_hooks: Vec::new(),
             endpoint_middleware: HashMap::new(),
             endpoint_hooks: HashMap::new(),
+            router_transforms: Vec::new(),
+            router_enforcement_capabilities: HashSet::new(),
+            allowed_unenforced_capabilities: HashMap::new(),
             plugins: HashSet::new(),
             error_mapper: Arc::new(soaprs_http::DefaultHttpErrorMapper),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
@@ -123,6 +130,8 @@ impl SoapRouterBuilder {
             global_hooks: &mut self.global_hooks,
             endpoint_middleware: &mut self.endpoint_middleware,
             endpoint_hooks: &mut self.endpoint_hooks,
+            router_transforms: &mut self.router_transforms,
+            router_enforcement_capabilities: &mut self.router_enforcement_capabilities,
         };
         plugin.install(&mut context)?;
         self.plugins.insert(name.to_owned());
@@ -150,6 +159,30 @@ impl SoapRouterBuilder {
             ));
         }
         self.max_body_bytes = max_body_bytes;
+        Ok(self)
+    }
+
+    /// Explicitly allows one declared endpoint policy to remain unenforced.
+    ///
+    /// This escape hatch is intended for contract metadata used only by
+    /// documentation/schema tooling or for enforcement delegated outside this
+    /// router. Security-sensitive applications should prefer installing a
+    /// provider through middleware or a router plugin.
+    pub fn allow_unenforced(
+        mut self,
+        endpoint_id: &str,
+        capability: HttpEnforcementCapability,
+    ) -> SoapResult<Self> {
+        let id = EndpointId::new(endpoint_id)?;
+        if self.catalog.endpoint(&id).is_none() {
+            return Err(SoapError::not_found(format!(
+                "endpoint `{endpoint_id}` is not declared"
+            )));
+        }
+        self.allowed_unenforced_capabilities
+            .entry(id)
+            .or_default()
+            .insert(capability);
         Ok(self)
     }
 
@@ -190,6 +223,12 @@ impl SoapRouterBuilder {
                 middleware.extend(installed);
             }
             middleware.extend(binding.middleware);
+            validate_enforcement_coverage(
+                &endpoint,
+                &middleware,
+                &self.router_enforcement_capabilities,
+                self.allowed_unenforced_capabilities.get(&endpoint_id),
+            )?;
 
             let mut hooks = self.global_hooks.clone();
             if let Some(installed) = self.endpoint_hooks.remove(&endpoint_id) {
@@ -216,8 +255,46 @@ impl SoapRouterBuilder {
                 ),
             );
         }
+        for transform in self.router_transforms {
+            router = transform(router)?;
+        }
         Ok(router)
     }
+}
+
+fn validate_enforcement_coverage(
+    endpoint: &EndpointMetadata,
+    middleware: &[Arc<dyn EndpointMiddleware>],
+    router_capabilities: &HashSet<HttpEnforcementCapability>,
+    allowed_unenforced: Option<&HashSet<HttpEnforcementCapability>>,
+) -> SoapResult<()> {
+    let missing = endpoint
+        .required_enforcement_capabilities()
+        .into_iter()
+        .filter(|required| {
+            if allowed_unenforced.is_some_and(|allowed| allowed.contains(required)) {
+                return false;
+            }
+            let provided_at_router = router_capabilities.contains(required);
+            let provided_at_endpoint = *required != HttpEnforcementCapability::Cors
+                && middleware
+                    .iter()
+                    .any(|middleware| middleware.enforcement_capabilities().contains(required));
+            !provided_at_router && !provided_at_endpoint
+        })
+        .collect::<Vec<HttpEnforcementCapability>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(SoapError::validation(format!(
+        "endpoint `{}` requires missing HTTP enforcement capabilities: {}",
+        endpoint.id,
+        missing
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 struct EndpointRuntime {
@@ -238,6 +315,10 @@ impl EndpointRuntime {
                 if let Err(error) = apply_response_policies(&self.endpoint, response.headers_mut())
                 {
                     return error_response(self.error_mapper.as_ref(), &error);
+                }
+                let view = ResponseView::new(response.status(), response.headers());
+                for hook in &self.hooks {
+                    hook.on_normalization_rejection(&self.endpoint, &error, view);
                 }
                 return response;
             }
@@ -288,7 +369,7 @@ impl EndpointRuntime {
     ) -> SoapResult<RouteRequest> {
         let (parts, body) = request.into_parts();
         let cookies = parse_cookies(&parts.headers)?;
-        let query_parameters = parse_query(parts.uri.query());
+        let query_parameters = parse_query(parts.uri.query())?;
         let path_parameters = params
             .iter()
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
@@ -327,9 +408,15 @@ impl EndpointRuntime {
     }
 }
 
-fn parse_query(query: Option<&str>) -> BTreeMap<String, Vec<String>> {
+fn parse_query(query: Option<&str>) -> SoapResult<BTreeMap<String, Vec<String>>> {
     let mut parameters = BTreeMap::<String, Vec<String>>::new();
     if let Some(query) = query {
+        validate_percent_encoding(query)?;
+        percent_decode_str(query).decode_utf8().map_err(|error| {
+            HttpRejection::bad_request("query string is not valid UTF-8")
+                .with_source(error)
+                .into_error()
+        })?;
         for (name, value) in form_urlencoded::parse(query.as_bytes()) {
             parameters
                 .entry(name.into_owned())
@@ -337,7 +424,26 @@ fn parse_query(query: Option<&str>) -> BTreeMap<String, Vec<String>> {
                 .push(value.into_owned());
         }
     }
-    parameters
+    Ok(parameters)
+}
+
+fn validate_percent_encoding(value: &str) -> SoapResult<()> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && (index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit())
+        {
+            return Err(HttpRejection::bad_request(
+                "query string contains invalid percent encoding",
+            )
+            .into_error());
+        }
+        index += if bytes[index] == b'%' { 3 } else { 1 };
+    }
+    Ok(())
 }
 
 fn parse_cookies(headers: &HeaderMap) -> SoapResult<BTreeMap<String, String>> {
@@ -357,9 +463,10 @@ fn parse_cookies(headers: &HeaderMap) -> SoapResult<BTreeMap<String, String>> {
                 return Err(HttpRejection::bad_request("malformed Cookie header").into_error());
             };
             let name = name.trim();
-            let value = value.trim();
-            if !valid_cookie_name(name) || value.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
-            {
+            let Some(value) = valid_cookie_value(value.trim()) else {
+                return Err(HttpRejection::bad_request("invalid cookie name or value").into_error());
+            };
+            if !valid_cookie_name(name) {
                 return Err(HttpRejection::bad_request("invalid cookie name or value").into_error());
             }
             if cookies.insert(name.to_owned(), value.to_owned()).is_some() {
@@ -371,6 +478,22 @@ fn parse_cookies(headers: &HeaderMap) -> SoapResult<BTreeMap<String, String>> {
         }
     }
     Ok(cookies)
+}
+
+fn valid_cookie_value(value: &str) -> Option<&str> {
+    let value = if value.starts_with('"') || value.ends_with('"') {
+        value.strip_prefix('"')?.strip_suffix('"')?
+    } else {
+        value
+    };
+    value.bytes().all(cookie_octet).then_some(value)
+}
+
+const fn cookie_octet(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e
+    )
 }
 
 fn valid_cookie_name(name: &str) -> bool {

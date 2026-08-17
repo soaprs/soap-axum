@@ -74,10 +74,21 @@ match the declared DTO remains a validation error (422).
 - Middleware registered on `SoapRouterBuilder` is global. Middleware attached to
   `EndpointBinding` runs only for that endpoint.
 - `EndpointHook` observes request, outcome, and final response lifecycle events.
-- `RouterPlugin` installs middleware and hooks at build time. The adapter does
-  not own server startup or shutdown.
+- `EndpointHook::on_normalization_rejection` observes matched requests rejected
+  before a complete `RouteRequest` can be created.
+- `RouterPlugin` installs middleware and hooks at build time and can transform
+  the completed native router for preflight routes or outer telemetry layers.
+  The adapter does not own server startup or shutdown.
 - Auth, validation, rate limiting, security, and telemetry implementations live
   in separate packages and plug into these extension points.
+
+Middleware declares the portable enforcement it provides. Router construction
+fails when endpoint metadata requests authentication, validation, rate limiting,
+CORS, or CSRF without a matching provider. CORS must be supplied by a
+router-level plugin because endpoint middleware cannot serve unmatched
+preflight `OPTIONS` requests. `allow_unenforced(endpoint_id, capability)` is an
+explicit escape hatch for metadata enforced outside this router; it is never
+applied implicitly.
 
 Middleware runs in registration order before the endpoint and unwinds in the
 opposite order afterwards. Global middleware wraps endpoint-local middleware.

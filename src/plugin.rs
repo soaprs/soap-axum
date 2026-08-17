@@ -1,11 +1,17 @@
 //! Build-time router plugins.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+use axum::Router;
 use soaprs_core::{SoapError, SoapResult};
-use soaprs_http::{EndpointCatalog, EndpointId};
+use soaprs_http::{EndpointCatalog, EndpointId, HttpEnforcementCapability};
 
 use crate::{EndpointHook, EndpointMiddleware};
+
+pub(crate) type RouterTransform = Box<dyn Fn(Router) -> SoapResult<Router> + Send + Sync + 'static>;
 
 /// Build-time extension that installs middleware and hooks without owning the
 /// Axum server lifecycle.
@@ -24,6 +30,8 @@ pub struct PluginContext<'a> {
     pub(crate) global_hooks: &'a mut Vec<Arc<dyn EndpointHook>>,
     pub(crate) endpoint_middleware: &'a mut HashMap<EndpointId, Vec<Arc<dyn EndpointMiddleware>>>,
     pub(crate) endpoint_hooks: &'a mut HashMap<EndpointId, Vec<Arc<dyn EndpointHook>>>,
+    pub(crate) router_transforms: &'a mut Vec<RouterTransform>,
+    pub(crate) router_enforcement_capabilities: &'a mut HashSet<HttpEnforcementCapability>,
 }
 
 impl PluginContext<'_> {
@@ -46,6 +54,27 @@ impl PluginContext<'_> {
         H: EndpointHook + 'static,
     {
         self.global_hooks.push(Arc::new(hook));
+    }
+
+    /// Applies one framework-level transformation after catalog routes have
+    /// been built.
+    ///
+    /// This extension point is intended for behavior that cannot run inside a
+    /// matched endpoint pipeline, including CORS preflight routes and outer
+    /// telemetry layers.
+    pub fn transform_router<F>(&mut self, transform: F)
+    where
+        F: Fn(Router) -> SoapResult<Router> + Send + Sync + 'static,
+    {
+        self.router_transforms.push(Box::new(transform));
+    }
+
+    /// Declares enforcement provided at the framework-router level.
+    ///
+    /// CORS coverage must be declared here because endpoint middleware cannot
+    /// serve unmatched preflight `OPTIONS` requests.
+    pub fn router_enforcement_capability(&mut self, capability: HttpEnforcementCapability) {
+        self.router_enforcement_capabilities.insert(capability);
     }
 
     /// Appends middleware to one declared endpoint.

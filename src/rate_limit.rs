@@ -107,6 +107,10 @@ impl<L> EndpointMiddleware for RateLimitMiddleware<L>
 where
     L: RateLimiter + 'static,
 {
+    fn enforcement_capabilities(&self) -> &'static [soaprs_http::HttpEnforcementCapability] {
+        &[soaprs_http::HttpEnforcementCapability::RateLimit]
+    }
+
     fn handle<'a>(
         &'a self,
         request: &'a mut RouteRequest,

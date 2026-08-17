@@ -1,6 +1,8 @@
 //! Observational endpoint lifecycle hooks.
 
 use http::{HeaderMap, StatusCode};
+use soaprs_core::SoapError;
+use soaprs_http::EndpointMetadata;
 
 use crate::{EndpointOutcome, RouteRequest};
 
@@ -29,6 +31,16 @@ impl<'a> ResponseView<'a> {
 
 /// Observes endpoint lifecycle without controlling request flow.
 pub trait EndpointHook: Send + Sync {
+    /// Observes a request rejected while parsing or buffering it, before a
+    /// complete [`RouteRequest`] exists.
+    fn on_normalization_rejection(
+        &self,
+        _endpoint: &EndpointMetadata,
+        _error: &SoapError,
+        _response: ResponseView<'_>,
+    ) {
+    }
+
     /// Runs after request normalization and before middleware.
     fn on_request(&self, _request: &RouteRequest) {}
 

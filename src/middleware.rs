@@ -3,7 +3,7 @@
 use std::{fmt, sync::Arc};
 
 use soaprs_core::{BoxFuture, SoapError, SoapResult};
-use soaprs_http::HttpResponseEffects;
+use soaprs_http::{HttpEnforcementCapability, HttpResponseEffects};
 
 use crate::{RouteRequest, RouteResponse, binding::EndpointTarget};
 
@@ -106,6 +106,15 @@ impl<'a> EndpointNext<'a> {
 
 /// Intercepts, delegates, or short-circuits an HTTP endpoint invocation.
 pub trait EndpointMiddleware: Send + Sync {
+    /// Declares portable endpoint policies actively enforced by this
+    /// middleware.
+    ///
+    /// The router uses this declaration to reject configurations that would
+    /// otherwise silently serve an endpoint without required enforcement.
+    fn enforcement_capabilities(&self) -> &'static [HttpEnforcementCapability] {
+        &[]
+    }
+
     /// Handles a request around the remaining endpoint pipeline.
     fn handle<'a>(
         &'a self,

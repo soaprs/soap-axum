@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Axum harness coverage for the shared `soaprs-contract-tests` HTTP adapter
   contract, including route registration, typed normalization and RouteIO,
   use-case isolation, response effects, and extension lifecycle ordering.
+- Fail-closed runtime capability coverage for declared authentication,
+  validation, rate-limit, CORS, and CSRF policies, with an explicit
+  `allow_unenforced` escape hatch for externally enforced metadata.
+- Router-level plugin transformations for preflight routes and outer layers,
+  plus lifecycle observation of request-normalization rejections.
+- Strict query percent-encoding and UTF-8 validation and RFC cookie-octet
+  parsing, including quoted request-cookie values.
 
 ### Changed
 

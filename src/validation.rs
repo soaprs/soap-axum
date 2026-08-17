@@ -45,6 +45,10 @@ impl<V> EndpointMiddleware for ValidationMiddleware<V>
 where
     V: HttpRequestContractValidator + 'static,
 {
+    fn enforcement_capabilities(&self) -> &'static [soaprs_http::HttpEnforcementCapability] {
+        &[soaprs_http::HttpEnforcementCapability::RequestValidation]
+    }
+
     fn handle<'a>(
         &'a self,
         request: &'a mut RouteRequest,

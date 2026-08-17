@@ -163,6 +163,10 @@ where
     A: Authenticator<Credential, P> + Send + Sync + 'static,
     P: Principal + Send + Sync + 'static,
 {
+    fn enforcement_capabilities(&self) -> &'static [soaprs_http::HttpEnforcementCapability] {
+        &[soaprs_http::HttpEnforcementCapability::Authentication]
+    }
+
     fn handle<'a>(
         &'a self,
         request: &'a mut RouteRequest,
