@@ -380,6 +380,7 @@ dependencies = [
  "bytes",
  "form_urlencoded",
  "http",
+ "http-body",
  "http-body-util",
  "percent-encoding",
  "serde",

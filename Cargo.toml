@@ -34,6 +34,7 @@ soaprs-validation = { version = "0.5.0", path = "../soap-validation", optional =
 tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
+http-body = "1"
 soaprs-contract-tests = { version = "0.5.0", path = "../soaprs/crates/soaprs-contract-tests" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }

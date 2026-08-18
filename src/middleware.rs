@@ -1,4 +1,4 @@
-//! Ordered HTTP middleware around endpoint dispatch.
+//! Ordered post-body HTTP middleware around endpoint dispatch.
 
 use std::{fmt, sync::Arc};
 
@@ -104,7 +104,7 @@ impl<'a> EndpointNext<'a> {
     }
 }
 
-/// Intercepts, delegates, or short-circuits an HTTP endpoint invocation.
+/// Intercepts, delegates, or short-circuits after bounded body buffering.
 pub trait EndpointMiddleware: Send + Sync {
     /// Declares portable endpoint policies actively enforced by this
     /// middleware.

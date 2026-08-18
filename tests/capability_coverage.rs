@@ -14,8 +14,9 @@ use axum::{
 };
 use http::{Method, StatusCode};
 use soaprs_axum::{
-    EmptyRouteIo, EndpointBinding, EndpointMiddleware, EndpointNext, EndpointOutcome,
-    PluginContext, RouteRequest, RouteResponse, RouterPlugin, SoapRouter,
+    EmptyRouteIo, EndpointBinding, EndpointGuard, EndpointGuardResult, EndpointMiddleware,
+    EndpointNext, EndpointOutcome, PluginContext, RouteRequest, RouteRequestHead, RouteResponse,
+    RouterPlugin, SoapRouter,
 };
 use soaprs_core::{BoxFuture, SoapResult, UseCase};
 use soaprs_http::{
@@ -82,7 +83,42 @@ fn documented_endpoint() -> SoapResult<EndpointMetadata> {
 
 struct EndpointEnforcement;
 
-impl EndpointMiddleware for EndpointEnforcement {
+impl EndpointGuard for EndpointEnforcement {
+    fn enforcement_capabilities(&self) -> &'static [HttpEnforcementCapability] {
+        &[
+            HttpEnforcementCapability::Authentication,
+            HttpEnforcementCapability::RateLimit,
+            HttpEnforcementCapability::Csrf,
+        ]
+    }
+
+    fn check<'a>(
+        &'a self,
+        _request: &'a mut RouteRequestHead,
+    ) -> BoxFuture<'a, EndpointGuardResult> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct RequestValidation;
+
+impl EndpointMiddleware for RequestValidation {
+    fn enforcement_capabilities(&self) -> &'static [HttpEnforcementCapability] {
+        &[HttpEnforcementCapability::RequestValidation]
+    }
+
+    fn handle<'a>(
+        &'a self,
+        request: &'a mut RouteRequest,
+        next: EndpointNext<'a>,
+    ) -> BoxFuture<'a, EndpointOutcome> {
+        next.run(request)
+    }
+}
+
+struct WrongPhaseSecurity;
+
+impl EndpointMiddleware for WrongPhaseSecurity {
     fn enforcement_capabilities(&self) -> &'static [HttpEnforcementCapability] {
         &[
             HttpEnforcementCapability::Authentication,
@@ -188,8 +224,30 @@ fn build_requires_an_explicit_opt_out_for_externally_enforced_metadata() {
     assert!(result.is_ok(), "explicit external enforcement must build");
 }
 
+#[test]
+fn build_rejects_security_enforcement_installed_in_the_post_body_phase() {
+    let endpoint =
+        protected_endpoint().unwrap_or_else(|error| panic!("valid protected endpoint: {error}"));
+    let catalog = catalog(endpoint).unwrap_or_else(|error| panic!("valid catalog: {error}"));
+    let result = SoapRouter::builder(catalog)
+        .plugin(CorsRouterPlugin)
+        .and_then(|builder| builder.bind(ENDPOINT_ID, binding().middleware(WrongPhaseSecurity)))
+        .and_then(|builder| builder.build());
+    let error = result
+        .err()
+        .unwrap_or_else(|| panic!("post-body security must not satisfy pre-body coverage"));
+    for capability in ["authentication", "rate limiting", "CSRF"] {
+        assert!(
+            error.message().contains(capability),
+            "wrong-phase build error omitted {capability}: {}",
+            error.message()
+        );
+    }
+    assert!(!error.message().contains("request validation"));
+}
+
 #[tokio::test]
-async fn router_plugin_can_cover_preflight_while_endpoint_middleware_covers_the_pipeline() {
+async fn router_plugin_and_phase_specific_enforcement_cover_the_pipeline() {
     let statuses = Arc::new(Mutex::new(Vec::new()));
     let endpoint =
         protected_endpoint().unwrap_or_else(|error| panic!("valid protected endpoint: {error}"));
@@ -199,7 +257,14 @@ async fn router_plugin_can_cover_preflight_while_endpoint_middleware_covers_the_
             statuses: Arc::clone(&statuses),
         })
         .and_then(|builder| builder.plugin(CorsRouterPlugin))
-        .and_then(|builder| builder.bind(ENDPOINT_ID, binding().middleware(EndpointEnforcement)))
+        .and_then(|builder| {
+            builder.bind(
+                ENDPOINT_ID,
+                binding()
+                    .guard(EndpointEnforcement)
+                    .middleware(RequestValidation),
+            )
+        })
         .and_then(|builder| builder.build())
         .unwrap_or_else(|error| panic!("covered router must build: {error}"));
 

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use soaprs_core::{BoxFuture, SoapResult, UseCase};
 
-use crate::{EndpointHook, EndpointMiddleware, EndpointOutcome, RouteIo, RouteRequest};
+use crate::{
+    EndpointGuard, EndpointHook, EndpointMiddleware, EndpointOutcome, RouteIo, RouteRequest,
+};
 
 pub(crate) trait EndpointTarget: Send + Sync {
     fn call<'a>(&'a self, request: &'a RouteRequest) -> BoxFuture<'a, EndpointOutcome>;
@@ -82,9 +84,10 @@ where
     }
 }
 
-/// Type-erased endpoint target plus endpoint-local middleware and hooks.
+/// Type-erased endpoint target plus endpoint-local guards, middleware, and hooks.
 pub struct EndpointBinding {
     pub(crate) target: Arc<dyn EndpointTarget>,
+    pub(crate) guards: Vec<Arc<dyn EndpointGuard>>,
     pub(crate) middleware: Vec<Arc<dyn EndpointMiddleware>>,
     pub(crate) hooks: Vec<Arc<dyn EndpointHook>>,
 }
@@ -104,6 +107,16 @@ impl EndpointBinding {
         H: HttpHandler + 'static,
     {
         HandlerBinding { handler }
+    }
+
+    /// Appends an endpoint-local admission guard evaluated before body reads.
+    #[must_use]
+    pub fn guard<G>(mut self, guard: G) -> Self
+    where
+        G: EndpointGuard + 'static,
+    {
+        self.guards.push(Arc::new(guard));
+        self
     }
 
     /// Appends endpoint-local middleware.
@@ -148,6 +161,7 @@ where
                 use_case: self.use_case,
                 route_io,
             }),
+            guards: Vec::new(),
             middleware: Vec::new(),
             hooks: Vec::new(),
         }
@@ -175,6 +189,7 @@ where
                 handler: self.handler,
                 route_io,
             }),
+            guards: Vec::new(),
             middleware: Vec::new(),
             hooks: Vec::new(),
         }

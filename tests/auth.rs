@@ -2,26 +2,47 @@
 
 #![cfg(feature = "auth")]
 
-use std::sync::Arc;
+use std::{
+    convert::Infallible,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use axum::{
-    body::{Body, to_bytes},
+    body::{Body, Bytes, HttpBody, to_bytes},
     http::{Request, header::AUTHORIZATION},
 };
 use http::{HeaderValue, Method, StatusCode};
+use http_body::Frame;
 use soaprs_auth::{
     Authentication, Authenticator, AuthorizationPolicy, Credential, Principal, StandardPrincipal,
 };
 use soaprs_auth_http::{BearerTokenExtractor, HttpAuthenticationService};
 use soaprs_axum::{
-    AuthContext, AuthenticationMiddleware, EmptyRouteIo, EndpointBinding, HttpAuthorization,
-    RouteRequest, RouteResponse, SoapRouter,
+    AuthContext, AuthenticationGuard, EmptyRouteIo, EndpointBinding, HttpAuthorization,
+    RouteRequest, RouteRequestHead, RouteResponse, SoapRouter,
 };
 use soaprs_core::{BoxFuture, SoapError, SoapResult, UseCase};
 use soaprs_http::{AuthChallenge, EndpointCatalog, EndpointMetadata, HttpRequestView, RoutePath};
 use tower::ServiceExt;
 
 struct TestAuthenticator;
+
+struct PendingBody;
+
+impl HttpBody for PendingBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Poll::Pending
+    }
+}
 
 impl Authenticator<Credential, StandardPrincipal> for TestAuthenticator {
     fn authenticate(
@@ -51,12 +72,11 @@ impl UseCase for EchoPrincipal {
     }
 }
 
-fn auth_middleware()
--> SoapResult<AuthenticationMiddleware<BearerTokenExtractor, TestAuthenticator, StandardPrincipal>>
-{
+fn auth_guard()
+-> SoapResult<AuthenticationGuard<BearerTokenExtractor, TestAuthenticator, StandardPrincipal>> {
     let extractor = BearerTokenExtractor::new("jwt")?;
     let service = HttpAuthenticationService::new(extractor, TestAuthenticator);
-    Ok(AuthenticationMiddleware::new(service)
+    Ok(AuthenticationGuard::new(service)
         .challenge(AuthChallenge::new("Bearer")?.realm("soaprs-api")?))
 }
 
@@ -64,11 +84,7 @@ fn application(
     id: &str,
     path: &str,
     policy: AuthorizationPolicy,
-    middleware: AuthenticationMiddleware<
-        BearerTokenExtractor,
-        TestAuthenticator,
-        StandardPrincipal,
-    >,
+    guard: AuthenticationGuard<BearerTokenExtractor, TestAuthenticator, StandardPrincipal>,
 ) -> SoapResult<axum::Router> {
     let endpoint =
         EndpointMetadata::new(id, Method::GET, RoutePath::new(path)?)?.authorize(policy)?;
@@ -88,23 +104,18 @@ fn application(
     );
     let binding = EndpointBinding::use_case(Arc::new(EchoPrincipal)).route_io(route_io);
     SoapRouter::builder(catalog)
-        .middleware(middleware)
+        .guard(guard)
         .bind(id, binding)?
         .build()
 }
 
 #[tokio::test]
 async fn required_auth_exposes_typed_context_and_challenges_missing_credentials() {
-    let middleware = match auth_middleware() {
-        Ok(middleware) => middleware,
-        Err(error) => panic!("valid auth middleware: {error}"),
+    let guard = match auth_guard() {
+        Ok(guard) => guard,
+        Err(error) => panic!("valid auth guard: {error}"),
     };
-    let app = match application(
-        "users.me",
-        "/me",
-        AuthorizationPolicy::Authenticated,
-        middleware,
-    ) {
+    let app = match application("users.me", "/me", AuthorizationPolicy::Authenticated, guard) {
         Ok(app) => app,
         Err(error) => panic!("build authenticated app: {error}"),
     };
@@ -144,16 +155,38 @@ async fn required_auth_exposes_typed_context_and_challenges_missing_credentials(
 }
 
 #[tokio::test]
+async fn missing_authentication_is_rejected_without_polling_the_body() {
+    let guard = auth_guard().unwrap_or_else(|error| panic!("valid auth guard: {error}"));
+    let app = application(
+        "users.pre_body",
+        "/pre-body",
+        AuthorizationPolicy::Authenticated,
+        guard,
+    )
+    .unwrap_or_else(|error| panic!("build pre-body auth app: {error}"));
+    let request = Request::get("/pre-body")
+        .body(Body::new(PendingBody))
+        .unwrap_or_else(|error| panic!("valid pending auth request: {error}"));
+
+    let response = tokio::time::timeout(Duration::from_millis(100), app.oneshot(request))
+        .await
+        .unwrap_or_else(|_| panic!("authentication attempted to read the request body"))
+        .unwrap_or_else(|error| panic!("pre-body auth response: {error}"));
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn built_in_authorization_enforces_roles_without_challenging_forbidden_requests() {
-    let middleware = match auth_middleware() {
-        Ok(middleware) => middleware,
-        Err(error) => panic!("valid auth middleware: {error}"),
+    let guard = match auth_guard() {
+        Ok(guard) => guard,
+        Err(error) => panic!("valid auth guard: {error}"),
     };
     let policy = match AuthorizationPolicy::any_role(["admin"]) {
         Ok(policy) => policy,
         Err(error) => panic!("valid role policy: {error}"),
     };
-    let app = match application("admin.get", "/admin", policy, middleware) {
+    let app = match application("admin.get", "/admin", policy, guard) {
         Ok(app) => app,
         Err(error) => panic!("build role app: {error}"),
     };
@@ -192,7 +225,7 @@ impl HttpAuthorization<StandardPrincipal> for NamedOwnerAuthorization {
     fn authorize<'a>(
         &'a self,
         authentication: Option<&'a Authentication<StandardPrincipal>>,
-        request: &'a RouteRequest,
+        request: &'a RouteRequestHead,
     ) -> BoxFuture<'a, SoapResult<()>> {
         Box::pin(async move {
             let authentication = authentication.ok_or_else(SoapError::unauthorized)?;
@@ -212,15 +245,15 @@ impl HttpAuthorization<StandardPrincipal> for NamedOwnerAuthorization {
 
 #[tokio::test]
 async fn application_authorization_can_resolve_named_resource_policy() {
-    let middleware = match auth_middleware() {
-        Ok(middleware) => middleware.authorization(NamedOwnerAuthorization),
-        Err(error) => panic!("valid auth middleware: {error}"),
+    let guard = match auth_guard() {
+        Ok(guard) => guard.authorization(NamedOwnerAuthorization),
+        Err(error) => panic!("valid auth guard: {error}"),
     };
     let policy = match AuthorizationPolicy::named("resource.owner") {
         Ok(policy) => policy,
         Err(error) => panic!("valid named policy: {error}"),
     };
-    let app = match application("owner.get", "/owner", policy, middleware) {
+    let app = match application("owner.get", "/owner", policy, guard) {
         Ok(app) => app,
         Err(error) => panic!("build named-policy app: {error}"),
     };

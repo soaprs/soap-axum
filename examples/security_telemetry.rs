@@ -18,8 +18,9 @@ use http::{
 };
 use serde::{Deserialize, Serialize};
 use soaprs_axum::{
-    EndpointBinding, EndpointHook, EndpointMiddleware, EndpointNext, EndpointOutcome, JsonResponse,
-    PluginContext, ResponseView, RouteRequest, RouterPlugin, SoapRouter, TypedJsonRouteIo,
+    EndpointBinding, EndpointGuard, EndpointGuardRejection, EndpointGuardResult, EndpointHook,
+    JsonResponse, PluginContext, ResponseView, RouteRequest, RouteRequestHead, RouterPlugin,
+    SoapRouter, TypedJsonRouteIo,
 };
 use soaprs_core::{BoxFuture, SoapError, SoapResult, UseCase};
 use soaprs_http::{
@@ -69,21 +70,20 @@ impl UseCase for CreateNote {
 
 struct DemoCsrf;
 
-impl EndpointMiddleware for DemoCsrf {
+impl EndpointGuard for DemoCsrf {
     fn enforcement_capabilities(&self) -> &'static [HttpEnforcementCapability] {
         &[HttpEnforcementCapability::Csrf]
     }
 
-    fn handle<'a>(
+    fn check<'a>(
         &'a self,
-        request: &'a mut RouteRequest,
-        next: EndpointNext<'a>,
-    ) -> BoxFuture<'a, EndpointOutcome> {
+        request: &'a mut RouteRequestHead,
+    ) -> BoxFuture<'a, EndpointGuardResult> {
         Box::pin(async move {
             if request.headers().get(&CSRF_HEADER) != Some(&HeaderValue::from_static("demo")) {
-                return EndpointOutcome::failure(SoapError::forbidden());
+                return Err(EndpointGuardRejection::new(SoapError::forbidden()));
             }
-            next.run(request).await
+            Ok(())
         })
     }
 }
@@ -112,6 +112,20 @@ impl EndpointHook for ConsoleTelemetry {
             response.status()
         );
     }
+
+    fn on_guard_rejection(
+        &self,
+        request: &RouteRequestHead,
+        error: &SoapError,
+        response: ResponseView<'_>,
+    ) {
+        eprintln!(
+            "endpoint={} admission_error={:?} status={}",
+            request.endpoint().id,
+            error.kind(),
+            response.status()
+        );
+    }
 }
 
 struct DemoSecurityPlugin;
@@ -133,7 +147,7 @@ impl RouterPlugin for DemoSecurityPlugin {
             ));
         }
 
-        context.endpoint_middleware(ENDPOINT_ID, DemoCsrf)?;
+        context.endpoint_guard(ENDPOINT_ID, DemoCsrf)?;
         context.hook(ConsoleTelemetry);
         context.router_enforcement_capability(HttpEnforcementCapability::Cors);
         context.augment_router(|router| Ok(router.route("/notes", options(preflight))));

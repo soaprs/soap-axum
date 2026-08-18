@@ -17,7 +17,7 @@ use axum::{
 };
 use http::{HeaderValue, Method, StatusCode, header::RETRY_AFTER};
 use soaprs_axum::{
-    EmptyRouteIo, EndpointBinding, RateLimitMiddleware, RouteRequest, RouteResponse, SoapRouter,
+    EmptyRouteIo, EndpointBinding, RateLimitGuard, RouteRequest, RouteResponse, SoapRouter,
 };
 use soaprs_core::{BoxFuture, SoapError, SoapResult, UseCase};
 use soaprs_http::{EndpointCatalog, EndpointMetadata, RateLimitPolicy, RateLimitScope, RoutePath};
@@ -94,11 +94,11 @@ async fn maps_a_rejected_global_quota_to_429_and_ceiled_retry_after() {
         calls: Arc::clone(&operation_calls),
     }))
     .route_io(route_io);
-    let middleware = RateLimitMiddleware::new(RateLimitService::new(OnceLimiter {
+    let guard = RateLimitGuard::new(RateLimitService::new(OnceLimiter {
         calls: Arc::clone(&limiter_calls),
     }));
     let app = match SoapRouter::builder(catalog)
-        .middleware(middleware)
+        .guard(guard)
         .bind("rate-limit.check", binding)
         .and_then(|builder| builder.build())
     {

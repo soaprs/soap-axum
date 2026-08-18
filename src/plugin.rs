@@ -9,11 +9,11 @@ use axum::Router;
 use soaprs_core::{SoapError, SoapResult};
 use soaprs_http::{EndpointCatalog, EndpointId, HttpEnforcementCapability};
 
-use crate::{EndpointHook, EndpointMiddleware};
+use crate::{EndpointGuard, EndpointHook, EndpointMiddleware};
 
 pub(crate) type RouterTransform = Box<dyn Fn(Router) -> SoapResult<Router> + Send + Sync + 'static>;
 
-/// Build-time extension that installs middleware and hooks without owning the
+/// Build-time extension that installs guards, middleware, and hooks without owning the
 /// Axum server lifecycle.
 pub trait RouterPlugin: Send + Sync {
     /// Stable plugin name used for duplicate detection.
@@ -26,8 +26,10 @@ pub trait RouterPlugin: Send + Sync {
 /// Restricted composition surface exposed to router plugins.
 pub struct PluginContext<'a> {
     pub(crate) catalog: &'a EndpointCatalog,
+    pub(crate) global_guards: &'a mut Vec<Arc<dyn EndpointGuard>>,
     pub(crate) global_middleware: &'a mut Vec<Arc<dyn EndpointMiddleware>>,
     pub(crate) global_hooks: &'a mut Vec<Arc<dyn EndpointHook>>,
+    pub(crate) endpoint_guards: &'a mut HashMap<EndpointId, Vec<Arc<dyn EndpointGuard>>>,
     pub(crate) endpoint_middleware: &'a mut HashMap<EndpointId, Vec<Arc<dyn EndpointMiddleware>>>,
     pub(crate) endpoint_hooks: &'a mut HashMap<EndpointId, Vec<Arc<dyn EndpointHook>>>,
     pub(crate) router_augmentations: &'a mut Vec<RouterTransform>,
@@ -39,6 +41,14 @@ impl PluginContext<'_> {
     /// Returns the catalog being composed.
     pub fn catalog(&self) -> &EndpointCatalog {
         self.catalog
+    }
+
+    /// Appends a global admission guard evaluated before request-body reads.
+    pub fn guard<G>(&mut self, guard: G)
+    where
+        G: EndpointGuard + 'static,
+    {
+        self.global_guards.push(Arc::new(guard));
     }
 
     /// Appends global middleware.
@@ -98,6 +108,19 @@ impl PluginContext<'_> {
             .entry(id)
             .or_default()
             .push(Arc::new(middleware));
+        Ok(())
+    }
+
+    /// Appends a pre-body admission guard to one declared endpoint.
+    pub fn endpoint_guard<G>(&mut self, endpoint_id: &str, guard: G) -> SoapResult<()>
+    where
+        G: EndpointGuard + 'static,
+    {
+        let id = self.require_endpoint(endpoint_id)?;
+        self.endpoint_guards
+            .entry(id)
+            .or_default()
+            .push(Arc::new(guard));
         Ok(())
     }
 

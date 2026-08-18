@@ -1,13 +1,15 @@
 # soaprs-axum
 
-`soaprs-axum` 0.5 turns a `soaprs-http` `EndpointCatalog` into an Axum 0.8
+`soaprs-axum` turns a `soaprs-http` `EndpointCatalog` into an Axum 0.8
 router. It keeps transport mapping at the HTTP boundary and lets application
 use cases operate exclusively on typed input and output.
 
 ```text
 Axum request
-  → normalization
-  → global and endpoint middleware
+  → route match and request-head normalization
+  → global and endpoint admission guards
+  → bounded request-body buffering
+  → global and endpoint post-body middleware
   → RouteIo::map_request
   → UseCase::execute
   → RouteIo::map_response
@@ -69,49 +71,57 @@ match the declared DTO remains a validation error (422).
 
 ## Extension model
 
+- `EndpointGuard` receives `RouteRequestHead` after method, URI, path, query,
+  headers, and cookies have been normalized, but before the body is polled. It
+  is the fail-closed extension point for authentication, authorization, rate
+  limiting, CSRF, and cheap request-context enrichment. Every guard runs in
+  registration order until the first rejection.
 - `EndpointMiddleware` can inspect and enrich normalized requests, short-circuit
-  processing, observe errors, and append response effects.
-- Middleware registered on `SoapRouterBuilder` is global. Middleware attached to
-  `EndpointBinding` runs only for that endpoint.
-- `EndpointHook` observes request, outcome, and final response lifecycle events.
-- `EndpointHook::on_normalization_rejection` observes matched requests rejected
-  before a complete `RouteRequest` can be created.
-- `RouterPlugin` installs middleware and hooks at build time. `augment_router`
-  adds preflight or other framework-level routes first; `wrap_router` then
+  processing, observe errors, and append response effects after the bounded
+  body is available. Body-dependent validation belongs in this phase.
+- Guards and middleware registered on `SoapRouterBuilder` are global. Those
+  attached to `EndpointBinding` run only for that endpoint.
+- `EndpointHook` separately observes normalized heads, guard rejection, body
+  rejection, post-body request/outcome/response, and whole-request timeout.
+- `RouterPlugin` installs guards, middleware, and hooks at build time.
+  `augment_router` adds preflight or other framework-level routes first; `wrap_router` then
   applies outer telemetry/policy layers around every catalog and contributed
   route. The adapter does not own server startup or shutdown.
 - Auth, validation, rate limiting, security, and telemetry implementations live
   in separate packages and plug into these extension points.
 
-Middleware declares the portable enforcement it provides. Router construction
-fails when endpoint metadata requests authentication, validation, rate limiting,
-CORS, or CSRF without a matching provider. CORS must be supplied by a
-router-level plugin because endpoint middleware cannot serve unmatched
-preflight `OPTIONS` requests. `allow_unenforced(endpoint_id, capability)` is an
+Guards and middleware declare the portable enforcement they provide. Router
+construction fails when endpoint metadata requests authentication, validation,
+rate limiting, CORS, or CSRF without a matching provider. CORS must be supplied by a
+router-level plugin because endpoint extensions cannot serve unmatched
+preflight `OPTIONS` requests. Authentication, rate limiting, and CSRF require
+a pre-body guard; request validation requires post-body middleware. A provider
+in the wrong phase does not satisfy fail-closed coverage.
+`allow_unenforced(endpoint_id, capability)` is an
 explicit escape hatch for metadata enforced outside this router; it is never
 applied implicitly.
 
-Middleware runs in registration order before the endpoint and unwinds in the
+Guards run in registration order and cannot skip later guards. Middleware runs
+in registration order before the endpoint and unwinds in the
 opposite order afterwards. Global middleware wraps endpoint-local middleware.
-An endpoint `timeout` wraps the complete middleware and target invocation; a
-deadline is mapped through `SoapError::timeout` and remains observable by
-outcome and response hooks. Request-body normalization has its own size cap and
-happens before this invocation deadline.
+An endpoint `timeout` covers guard execution, bounded body buffering,
+post-body middleware, RouteIO, and target invocation. A deadline is mapped
+through `SoapError::timeout` and remains observable by `on_timeout` hooks.
 
 ## Optional authentication bridge
 
 The `auth` feature composes the framework-neutral contracts from `soaprs-auth`
-and `soaprs-auth-http` as ordinary endpoint middleware:
+and `soaprs-auth-http` as a pre-body admission guard:
 
 ```toml
 soaprs-axum = { version = "0.5", features = ["auth"] }
 ```
 
-`AuthenticationMiddleware` delegates credential extraction and authentication
+`AuthenticationGuard` delegates credential extraction and authentication
 to an `HttpAuthenticationService`, enforces the authorization policy declared
-in `EndpointMetadata`, and stores a typed `AuthContext<P>` in the normalized
-request extensions. `RouteIo` can map that principal into use-case input, so
-the use case remains independent of HTTP and Axum.
+in `EndpointMetadata`, and stores a typed `AuthContext<P>` in request
+extensions before the body is read. `RouteIo` can map that principal into
+use-case input, so the use case remains independent of HTTP and Axum.
 
 The default evaluator handles soaprs identity, role, permission, strategy, and
 authenticated policies. Applications can provide `HttpAuthorization` when a
@@ -119,8 +129,9 @@ named policy needs resource or tenant context. In particular, the adapter does
 not implement tokens, cryptography, sessions, user storage, or named-policy
 business rules.
 
-The middleware can be registered globally, by a `RouterPlugin`, or on a single
-`EndpointBinding`, using the same ordering rules as every other extension.
+The guard can be registered globally, by a `RouterPlugin`, or on a single
+`EndpointBinding`. Authorization which depends on decoded body data remains an
+application/use-case concern and must run before the protected state change.
 
 ## Optional capability bridges
 
@@ -129,9 +140,10 @@ matched endpoint, normalized `HttpRequestView`, and already-buffered body to a
 `soaprs-validation::HttpValidationService`. Contract resolution and the actual
 validation engine remain application or provider code.
 
-The `rate-limit` feature provides `RateLimitMiddleware<L>`. It maps an
+The `rate-limit` feature provides `RateLimitGuard<L>`. It maps an
 endpoint's `RateLimitPolicy` to the runtime-neutral `soaprs-rate-limit` port.
-Allowed decisions continue the pipeline; rejected decisions become
+The decision is made before body buffering. Allowed decisions continue the
+pipeline; rejected decisions become
 `SoapError::rate_limited`, HTTP 429, and a validated `Retry-After` response
 effect.
 
@@ -195,16 +207,17 @@ capabilities into `soaprs-axum`.
 
 The default global encoded-body ceiling is 2 MiB. Endpoint `BodyLimitPolicy`
 can lower it. Trusted proxy processing and request-ID generation must be
-installed explicitly by boundary middleware.
+installed explicitly at the boundary or by an early guard before a client-IP
+rate-limit guard.
 
 ## Vertical-slice acceptance test
 
 `tests/reference_application.rs` composes catalog registration, normalized
 path/query/header/body input, `RouteIo`, a pure `UseCase`, authentication,
 application-owned validator and limiter implementations through typed plugins,
-endpoint middleware, telemetry hooks, response effects, response policies, and
-a deadline. Its four requests prove ordered short-circuit behavior for 401,
-422, 201, and 429.
+pre-body guards, endpoint middleware, telemetry hooks, response effects,
+response policies, and a whole-request deadline. Its four requests prove
+ordered short-circuit behavior for 401, 422, 201, and 429.
 
 ```console
 cargo test --all-features --test reference_application

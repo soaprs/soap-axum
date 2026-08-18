@@ -14,7 +14,7 @@ use soaprs_axum::{
     EmptyRouteIo, EndpointBinding, EndpointHook, EndpointOutcome, ResponseView, RouteRequest,
     RouteResponse, SoapRouter,
 };
-use soaprs_core::{BoxFuture, SoapErrorKind, SoapResult, UseCase};
+use soaprs_core::{BoxFuture, SoapError, SoapErrorKind, SoapResult, UseCase};
 use soaprs_http::{EndpointCatalog, EndpointMetadata, RoutePath};
 use tower::ServiceExt;
 
@@ -45,6 +45,22 @@ struct RecordingHook {
 }
 
 impl EndpointHook for RecordingHook {
+    fn on_timeout(
+        &self,
+        _endpoint: &EndpointMetadata,
+        error: &SoapError,
+        response: ResponseView<'_>,
+    ) {
+        match self.lifecycle.outcome.lock() {
+            Ok(mut outcomes) => outcomes.push(Some(error.kind())),
+            Err(lock_error) => panic!("outcome lock poisoned: {lock_error}"),
+        }
+        match self.lifecycle.response.lock() {
+            Ok(mut responses) => responses.push(response.status()),
+            Err(lock_error) => panic!("response lock poisoned: {lock_error}"),
+        }
+    }
+
     fn on_outcome(&self, _request: &RouteRequest, outcome: &EndpointOutcome) {
         let error_kind = outcome.error().map(|error| error.kind());
         match self.lifecycle.outcome.lock() {

@@ -8,6 +8,7 @@
 #[cfg(feature = "auth")]
 mod auth;
 mod binding;
+mod guard;
 mod hook;
 mod middleware;
 mod plugin;
@@ -23,15 +24,16 @@ mod router;
 mod validation;
 
 #[cfg(feature = "auth")]
-pub use auth::{AuthContext, AuthenticationMiddleware, BuiltInAuthorization, HttpAuthorization};
+pub use auth::{AuthContext, AuthenticationGuard, BuiltInAuthorization, HttpAuthorization};
 pub use binding::{EndpointBinding, HandlerBinding, HttpHandler, UseCaseBinding};
+pub use guard::{EndpointGuard, EndpointGuardRejection, EndpointGuardResult};
 pub use hook::{EndpointHook, ResponseView};
 pub use middleware::{EndpointMiddleware, EndpointNext, EndpointOutcome};
 pub use plugin::{PluginContext, RouterPlugin};
 #[cfg(feature = "rate-limit")]
-pub use rate_limit::{BuiltInRateLimitKeyResolver, HttpRateLimitKeyResolver, RateLimitMiddleware};
+pub use rate_limit::{BuiltInRateLimitKeyResolver, HttpRateLimitKeyResolver, RateLimitGuard};
 pub use rejection::HttpRejection;
-pub use request::{NormalizedRequest, RouteRequest};
+pub use request::{NormalizedRequest, NormalizedRequestHead, RouteRequest, RouteRequestHead};
 pub use response::{JsonResponse, RouteResponse};
 pub use route_io::{EmptyRouteIo, JsonRouteIo, RouteIo, TypedJsonRouteIo};
 pub use router::{SoapRouter, SoapRouterBuilder};

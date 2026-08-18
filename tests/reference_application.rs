@@ -27,10 +27,10 @@ use soaprs_auth::{
 };
 use soaprs_auth_http::{BearerTokenExtractor, HttpAuthenticationService};
 use soaprs_axum::{
-    AuthContext, AuthenticationMiddleware, EndpointBinding, EndpointHook, EndpointMiddleware,
+    AuthContext, AuthenticationGuard, EndpointBinding, EndpointHook, EndpointMiddleware,
     EndpointNext, EndpointOutcome, HttpRateLimitKeyResolver, JsonRouteIo, PluginContext,
-    RateLimitMiddleware, ResponseView, RouteRequest, RouteResponse, RouterPlugin, SoapRouter,
-    ValidationMiddleware,
+    RateLimitGuard, ResponseView, RouteRequest, RouteRequestHead, RouteResponse, RouterPlugin,
+    SoapRouter, ValidationMiddleware,
 };
 use soaprs_core::{BoxFuture, SoapError, SoapErrorKind, SoapResult, UseCase};
 use soaprs_http::{
@@ -244,9 +244,9 @@ impl RouterPlugin for RateLimitPlugin {
     }
 
     fn install(&self, context: &mut PluginContext<'_>) -> SoapResult<()> {
-        context.endpoint_middleware(
+        context.endpoint_guard(
             ENDPOINT_ID,
-            RateLimitMiddleware::new(RateLimitService::new(ReferenceRateLimiter {
+            RateLimitGuard::new(RateLimitService::new(ReferenceRateLimiter {
                 attempts: Arc::clone(&self.attempts),
             }))
             .key_resolver(ReferencePrincipalKeyResolver),
@@ -283,7 +283,7 @@ impl HttpRateLimitKeyResolver for ReferencePrincipalKeyResolver {
     fn resolve<'a>(
         &'a self,
         policy: &'a RateLimitPolicy,
-        request: &'a RouteRequest,
+        request: &'a RouteRequestHead,
     ) -> BoxFuture<'a, SoapResult<RateLimitKey>> {
         Box::pin(async move {
             if policy.scope != RateLimitScope::Principal {
@@ -333,11 +333,24 @@ struct ReferenceTelemetry {
 }
 
 impl EndpointHook for ReferenceTelemetry {
-    fn on_request(&self, request: &RouteRequest) {
+    fn on_request_head(&self, request: &RouteRequestHead) {
         match self.state.endpoint_ids.lock() {
             Ok(mut endpoint_ids) => endpoint_ids.push(request.endpoint().id.to_string()),
             Err(error) => panic!("telemetry request lock poisoned: {error}"),
         }
+    }
+
+    fn on_guard_rejection(
+        &self,
+        _request: &RouteRequestHead,
+        error: &SoapError,
+        response: ResponseView<'_>,
+    ) {
+        match self.state.outcomes.lock() {
+            Ok(mut outcomes) => outcomes.push(Some(error.kind())),
+            Err(lock_error) => panic!("telemetry outcome lock poisoned: {lock_error}"),
+        }
+        self.record_response(response);
     }
 
     fn on_outcome(&self, _request: &RouteRequest, outcome: &EndpointOutcome) {
@@ -348,6 +361,12 @@ impl EndpointHook for ReferenceTelemetry {
     }
 
     fn on_response(&self, _request: &RouteRequest, response: ResponseView<'_>) {
+        self.record_response(response);
+    }
+}
+
+impl ReferenceTelemetry {
+    fn record_response(&self, response: ResponseView<'_>) {
         let has_secure_default = response
             .headers()
             .get(X_CONTENT_TYPE_OPTIONS)
@@ -394,8 +413,12 @@ fn application() -> SoapResult<ReferenceApplication> {
     let body_limit = NonZeroU64::new(4096)
         .ok_or_else(|| SoapError::infrastructure("reference body limit is zero"))?;
     let cache = ResponseCachePolicy::private(Duration::from_secs(30))?.vary(vec![AUTHORIZATION]);
-    let rate_limit = RateLimitPolicy::new(NonZeroU32::MIN, Duration::from_secs(60))?
-        .scope(RateLimitScope::Principal);
+    let rate_limit = RateLimitPolicy::new(
+        NonZeroU32::new(2)
+            .ok_or_else(|| SoapError::infrastructure("reference rate limit is zero"))?,
+        Duration::from_secs(60),
+    )?
+    .scope(RateLimitScope::Principal);
     let endpoint = EndpointMetadata::new(
         ENDPOINT_ID,
         Method::POST,
@@ -480,7 +503,7 @@ fn application() -> SoapResult<ReferenceApplication> {
     });
 
     let extractor = BearerTokenExtractor::new("reference")?;
-    let auth = AuthenticationMiddleware::new(HttpAuthenticationService::new(
+    let auth = AuthenticationGuard::new(HttpAuthenticationService::new(
         extractor,
         ReferenceAuthenticator,
     ))
@@ -489,7 +512,7 @@ fn application() -> SoapResult<ReferenceApplication> {
     let rate_limit_attempts = Arc::new(AtomicUsize::new(0));
     let telemetry = Arc::new(TelemetryState::default());
     let builder = SoapRouter::builder(catalog)
-        .middleware(auth)
+        .guard(auth)
         .plugin(ValidationPlugin {
             calls: Arc::clone(&validation_calls),
         })?
@@ -595,8 +618,8 @@ async fn composes_the_complete_vertical_slice_without_owning_external_capabiliti
         limited.headers().get(RETRY_AFTER),
         Some(&HeaderValue::from_static("60"))
     );
-    assert_eq!(application.validation_calls.load(Ordering::SeqCst), 9);
-    assert_eq!(application.rate_limit_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(application.validation_calls.load(Ordering::SeqCst), 5);
+    assert_eq!(application.rate_limit_attempts.load(Ordering::SeqCst), 3);
     assert_eq!(application.local_calls.load(Ordering::SeqCst), 1);
 
     let seen_inputs = match application.seen_inputs.lock() {

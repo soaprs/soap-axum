@@ -13,7 +13,7 @@ use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use soaprs_axum::{
     EndpointBinding, EndpointHook, EndpointMiddleware, EndpointNext, EndpointOutcome, JsonResponse,
-    ResponseView, RouteRequest, SoapRouter, TypedJsonRouteIo,
+    ResponseView, RouteRequest, RouteRequestHead, SoapRouter, TypedJsonRouteIo,
 };
 use soaprs_contract_tests::{
     HttpAdapterHarness, HttpAdapterObservations, verify_http_adapter_contract,
@@ -134,6 +134,15 @@ impl EndpointHook for RecordingHook {
     fn on_normalization_rejection(
         &self,
         _endpoint: &EndpointMetadata,
+        _error: &SoapError,
+        _response: ResponseView<'_>,
+    ) {
+        record(&self.events, "hook.normalization_rejection");
+    }
+
+    fn on_body_rejection(
+        &self,
+        _request: &RouteRequestHead,
         _error: &SoapError,
         _response: ResponseView<'_>,
     ) {

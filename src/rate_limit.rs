@@ -9,7 +9,7 @@ use soaprs_rate_limit::{
     RateLimitDecision, RateLimitKey, RateLimitRequest, RateLimitRule, RateLimitService, RateLimiter,
 };
 
-use crate::{EndpointMiddleware, EndpointNext, EndpointOutcome, RouteRequest};
+use crate::{EndpointGuard, EndpointGuardRejection, EndpointGuardResult, RouteRequestHead};
 
 /// Derives an opaque limiter key from normalized HTTP and application context.
 pub trait HttpRateLimitKeyResolver: Send + Sync {
@@ -17,7 +17,7 @@ pub trait HttpRateLimitKeyResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
         policy: &'a RateLimitPolicy,
-        request: &'a RouteRequest,
+        request: &'a RouteRequestHead,
     ) -> BoxFuture<'a, SoapResult<RateLimitKey>>;
 }
 
@@ -32,7 +32,7 @@ impl HttpRateLimitKeyResolver for BuiltInRateLimitKeyResolver {
     fn resolve<'a>(
         &'a self,
         policy: &'a RateLimitPolicy,
-        request: &'a RouteRequest,
+        request: &'a RouteRequestHead,
     ) -> BoxFuture<'a, SoapResult<RateLimitKey>> {
         Box::pin(async move {
             let endpoint = &request.endpoint().id;
@@ -60,14 +60,14 @@ impl HttpRateLimitKeyResolver for BuiltInRateLimitKeyResolver {
     }
 }
 
-/// Checks endpoint quota through a neutral limiter before invoking route I/O.
-pub struct RateLimitMiddleware<L> {
+/// Checks endpoint quota through a neutral limiter before reading the body.
+pub struct RateLimitGuard<L> {
     service: Arc<RateLimitService<L>>,
     key_resolver: Arc<dyn HttpRateLimitKeyResolver>,
 }
 
-impl<L> RateLimitMiddleware<L> {
-    /// Creates middleware with global/client-IP key resolution.
+impl<L> RateLimitGuard<L> {
+    /// Creates a guard with global/client-IP key resolution.
     pub fn new(service: RateLimitService<L>) -> Self {
         Self {
             service: Arc::new(service),
@@ -86,7 +86,7 @@ impl<L> RateLimitMiddleware<L> {
     }
 }
 
-impl<L> Clone for RateLimitMiddleware<L> {
+impl<L> Clone for RateLimitGuard<L> {
     fn clone(&self) -> Self {
         Self {
             service: Arc::clone(&self.service),
@@ -95,15 +95,15 @@ impl<L> Clone for RateLimitMiddleware<L> {
     }
 }
 
-impl<L> fmt::Debug for RateLimitMiddleware<L> {
+impl<L> fmt::Debug for RateLimitGuard<L> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("RateLimitMiddleware")
+            .debug_struct("RateLimitGuard")
             .finish_non_exhaustive()
     }
 }
 
-impl<L> EndpointMiddleware for RateLimitMiddleware<L>
+impl<L> EndpointGuard for RateLimitGuard<L>
 where
     L: RateLimiter + 'static,
 {
@@ -111,40 +111,39 @@ where
         &[soaprs_http::HttpEnforcementCapability::RateLimit]
     }
 
-    fn handle<'a>(
+    fn check<'a>(
         &'a self,
-        request: &'a mut RouteRequest,
-        next: EndpointNext<'a>,
-    ) -> BoxFuture<'a, EndpointOutcome> {
+        request: &'a mut RouteRequestHead,
+    ) -> BoxFuture<'a, EndpointGuardResult> {
         Box::pin(async move {
             let Some(policy) = request.endpoint().rate_limit.as_ref() else {
-                return next.run(request).await;
+                return Ok(());
             };
             let rule = match rule(policy) {
                 Ok(rule) => rule,
-                Err(error) => return EndpointOutcome::failure(error),
+                Err(error) => return Err(EndpointGuardRejection::new(error)),
             };
             let key = match self.key_resolver.resolve(policy, request).await {
                 Ok(key) => key,
-                Err(error) => return EndpointOutcome::failure(error),
+                Err(error) => return Err(EndpointGuardRejection::new(error)),
             };
             let decision = match self.service.check(RateLimitRequest::new(&key, &rule)).await {
                 Ok(decision) => decision,
-                Err(error) => return EndpointOutcome::failure(error),
+                Err(error) => return Err(EndpointGuardRejection::new(error)),
             };
             match decision {
-                RateLimitDecision::Allowed { .. } => next.run(request).await,
+                RateLimitDecision::Allowed { .. } => Ok(()),
                 RateLimitDecision::Rejected { retry_after } => {
                     let retry_after = match retry_after_header(retry_after) {
                         Ok(retry_after) => retry_after,
-                        Err(error) => return EndpointOutcome::failure(error),
+                        Err(error) => return Err(EndpointGuardRejection::new(error)),
                     };
-                    let mut outcome = EndpointOutcome::failure(SoapError::rate_limited());
-                    outcome
+                    let mut rejection = EndpointGuardRejection::new(SoapError::rate_limited());
+                    rejection
                         .effects_mut()
                         .headers
                         .insert(RETRY_AFTER, retry_after);
-                    outcome
+                    Err(rejection)
                 }
             }
         })

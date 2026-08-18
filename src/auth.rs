@@ -9,10 +9,10 @@ use soaprs_auth_http::{HttpAuthenticationService, HttpCredentialExtractor, unaut
 use soaprs_core::{BoxFuture, SoapError, SoapErrorKind, SoapResult};
 use soaprs_http::AuthChallenge;
 
-use crate::{EndpointMiddleware, EndpointNext, EndpointOutcome, RouteRequest};
+use crate::{EndpointGuard, EndpointGuardRejection, EndpointGuardResult, RouteRequestHead};
 
 /// Typed authentication stored in request extensions by
-/// [`AuthenticationMiddleware`].
+/// [`AuthenticationGuard`].
 pub struct AuthContext<P> {
     authentication: Arc<Authentication<P>>,
 }
@@ -49,7 +49,7 @@ impl<P> fmt::Debug for AuthContext<P> {
     }
 }
 
-/// Enforces an endpoint's authorization policy after authentication.
+/// Enforces an endpoint's authorization policy after authentication and before body reads.
 ///
 /// Applications can replace the built-in implementation to resolve named
 /// policies with resource context while keeping that logic outside the Axum
@@ -59,7 +59,7 @@ pub trait HttpAuthorization<P>: Send + Sync {
     fn authorize<'a>(
         &'a self,
         authentication: Option<&'a Authentication<P>>,
-        request: &'a RouteRequest,
+        request: &'a RouteRequestHead,
     ) -> BoxFuture<'a, SoapResult<()>>;
 }
 
@@ -76,7 +76,7 @@ where
     fn authorize<'a>(
         &'a self,
         authentication: Option<&'a Authentication<P>>,
-        request: &'a RouteRequest,
+        request: &'a RouteRequestHead,
     ) -> BoxFuture<'a, SoapResult<()>> {
         Box::pin(async move {
             DefaultAuthorizationEvaluator
@@ -88,14 +88,14 @@ where
 
 /// Authenticates and authorizes requests through framework-neutral soaprs
 /// ports, then exposes [`AuthContext`] to route I/O and HTTP handlers.
-pub struct AuthenticationMiddleware<E, A, P> {
+pub struct AuthenticationGuard<E, A, P> {
     service: Arc<HttpAuthenticationService<E, A, P>>,
     authorization: Arc<dyn HttpAuthorization<P>>,
     challenges: Vec<AuthChallenge>,
 }
 
-impl<E, A, P> AuthenticationMiddleware<E, A, P> {
-    /// Creates middleware using built-in authorization evaluation.
+impl<E, A, P> AuthenticationGuard<E, A, P> {
+    /// Creates a pre-body guard using built-in authorization evaluation.
     pub fn new(service: HttpAuthenticationService<E, A, P>) -> Self
     where
         P: Principal + 'static,
@@ -125,20 +125,20 @@ impl<E, A, P> AuthenticationMiddleware<E, A, P> {
         self
     }
 
-    fn failure(&self, error: SoapError) -> EndpointOutcome {
+    fn failure(&self, error: SoapError) -> EndpointGuardRejection {
         let is_unauthorized = error.kind() == SoapErrorKind::Unauthorized;
-        let mut outcome = EndpointOutcome::failure(error);
+        let mut rejection = EndpointGuardRejection::new(error);
         if is_unauthorized && !self.challenges.is_empty() {
             match unauthorized_effects(self.challenges.iter()) {
-                Ok(effects) => *outcome.effects_mut() = effects,
-                Err(error) => return EndpointOutcome::failure(error),
+                Ok(effects) => *rejection.effects_mut() = effects,
+                Err(error) => return EndpointGuardRejection::new(error),
             }
         }
-        outcome
+        rejection
     }
 }
 
-impl<E, A, P> Clone for AuthenticationMiddleware<E, A, P> {
+impl<E, A, P> Clone for AuthenticationGuard<E, A, P> {
     fn clone(&self) -> Self {
         Self {
             service: Arc::clone(&self.service),
@@ -148,16 +148,16 @@ impl<E, A, P> Clone for AuthenticationMiddleware<E, A, P> {
     }
 }
 
-impl<E, A, P> fmt::Debug for AuthenticationMiddleware<E, A, P> {
+impl<E, A, P> fmt::Debug for AuthenticationGuard<E, A, P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("AuthenticationMiddleware")
+            .debug_struct("AuthenticationGuard")
             .field("challenges", &self.challenges)
             .finish_non_exhaustive()
     }
 }
 
-impl<E, A, P> EndpointMiddleware for AuthenticationMiddleware<E, A, P>
+impl<E, A, P> EndpointGuard for AuthenticationGuard<E, A, P>
 where
     E: HttpCredentialExtractor + Send + Sync + 'static,
     A: Authenticator<Credential, P> + Send + Sync + 'static,
@@ -167,11 +167,10 @@ where
         &[soaprs_http::HttpEnforcementCapability::Authentication]
     }
 
-    fn handle<'a>(
+    fn check<'a>(
         &'a self,
-        request: &'a mut RouteRequest,
-        next: EndpointNext<'a>,
-    ) -> BoxFuture<'a, EndpointOutcome> {
+        request: &'a mut RouteRequestHead,
+    ) -> BoxFuture<'a, EndpointGuardResult> {
         Box::pin(async move {
             let authentication = match self
                 .service
@@ -179,21 +178,21 @@ where
                 .await
             {
                 Ok(authentication) => authentication,
-                Err(error) => return self.failure(error),
+                Err(error) => return Err(self.failure(error)),
             };
             if let Err(error) = self
                 .authorization
                 .authorize(authentication.as_ref(), request)
                 .await
             {
-                return self.failure(error);
+                return Err(self.failure(error));
             }
             if let Some(authentication) = authentication {
                 request
                     .extensions_mut()
                     .insert(AuthContext::new(authentication));
             }
-            next.run(request).await
+            Ok(())
         })
     }
 }

@@ -16,7 +16,7 @@ mod enabled {
     };
     use soaprs_auth_http::{BearerTokenExtractor, HttpAuthenticationService};
     use soaprs_axum::{
-        AuthContext, AuthenticationMiddleware, EmptyRouteIo, EndpointBinding, RouteRequest,
+        AuthContext, AuthenticationGuard, EmptyRouteIo, EndpointBinding, RouteRequest,
         RouteResponse, SoapRouter,
     };
     use soaprs_core::{BoxFuture, SoapError, SoapResult, UseCase};
@@ -73,11 +73,11 @@ mod enabled {
 
         let extractor = BearerTokenExtractor::new("example")?;
         let service = HttpAuthenticationService::new(extractor, ExampleAuthenticator);
-        let auth = AuthenticationMiddleware::new(service)
+        let auth = AuthenticationGuard::new(service)
             .challenge(AuthChallenge::new("Bearer")?.realm("soaprs-example")?);
 
         SoapRouter::builder(catalog)
-            .middleware(auth)
+            .guard(auth)
             .bind("profile.get", binding)?
             .build()
     }

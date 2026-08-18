@@ -13,8 +13,8 @@ use soaprs_http::{EndpointMetadata, HttpRequestView};
 
 use crate::HttpRejection;
 
-/// Framework-normalized request data exposed to middleware and route I/O.
-pub struct NormalizedRequest {
+/// Framework-normalized request metadata available before the body is read.
+pub struct NormalizedRequestHead {
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -23,13 +23,12 @@ pub struct NormalizedRequest {
     query_parameters: BTreeMap<String, Vec<String>>,
     client_ip: Option<IpAddr>,
     request_id: Option<MessageId>,
-    body: Bytes,
 }
 
-impl fmt::Debug for NormalizedRequest {
+impl fmt::Debug for NormalizedRequestHead {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("NormalizedRequest")
+            .debug_struct("NormalizedRequestHead")
             .field("method", &self.method)
             .field("uri", &self.uri)
             .field("header_names", &self.headers.keys().collect::<Vec<_>>())
@@ -44,12 +43,11 @@ impl fmt::Debug for NormalizedRequest {
             )
             .field("client_ip", &self.client_ip)
             .field("request_id", &self.request_id)
-            .field("body_length", &self.body.len())
             .finish_non_exhaustive()
     }
 }
 
-impl NormalizedRequest {
+impl NormalizedRequestHead {
     pub(crate) fn new(
         method: Method,
         uri: Uri,
@@ -57,7 +55,6 @@ impl NormalizedRequest {
         cookies: BTreeMap<String, String>,
         path_parameters: BTreeMap<String, String>,
         query_parameters: BTreeMap<String, Vec<String>>,
-        body: Bytes,
     ) -> Self {
         Self {
             method,
@@ -68,13 +65,7 @@ impl NormalizedRequest {
             query_parameters,
             client_ip: None,
             request_id: None,
-            body,
         }
-    }
-
-    /// Returns the buffered encoded request body.
-    pub fn body(&self) -> &Bytes {
-        &self.body
     }
 
     /// Sets a client address after application-specific trusted-proxy processing.
@@ -88,7 +79,7 @@ impl NormalizedRequest {
     }
 }
 
-impl HttpRequestView for NormalizedRequest {
+impl HttpRequestView for NormalizedRequestHead {
     fn method(&self) -> &Method {
         &self.method
     }
@@ -122,6 +113,185 @@ impl HttpRequestView for NormalizedRequest {
     }
 }
 
+/// Complete normalized request data exposed after admission and body buffering.
+pub struct NormalizedRequest {
+    head: NormalizedRequestHead,
+    body: Bytes,
+}
+
+impl fmt::Debug for NormalizedRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NormalizedRequest")
+            .field("head", &self.head)
+            .field("body_length", &self.body.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl NormalizedRequest {
+    pub(crate) const fn new(head: NormalizedRequestHead, body: Bytes) -> Self {
+        Self { head, body }
+    }
+
+    /// Returns request metadata normalized before the body was read.
+    pub const fn head(&self) -> &NormalizedRequestHead {
+        &self.head
+    }
+
+    /// Returns request metadata mutably to trusted boundary middleware.
+    pub const fn head_mut(&mut self) -> &mut NormalizedRequestHead {
+        &mut self.head
+    }
+
+    /// Returns the buffered encoded request body.
+    pub const fn body(&self) -> &Bytes {
+        &self.body
+    }
+
+    /// Sets a client address after application-specific trusted-proxy processing.
+    pub fn set_client_ip(&mut self, client_ip: IpAddr) {
+        self.head.set_client_ip(client_ip);
+    }
+
+    /// Sets a request identity generated or accepted at the application boundary.
+    pub fn set_request_id(&mut self, request_id: impl Into<MessageId>) {
+        self.head.set_request_id(request_id);
+    }
+}
+
+impl HttpRequestView for NormalizedRequest {
+    fn method(&self) -> &Method {
+        self.head.method()
+    }
+
+    fn uri(&self) -> &Uri {
+        self.head.uri()
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        self.head.headers()
+    }
+
+    fn cookie(&self, name: &str) -> Option<&str> {
+        self.head.cookie(name)
+    }
+
+    fn path_parameter(&self, name: &str) -> Option<&str> {
+        self.head.path_parameter(name)
+    }
+
+    fn query_parameters(&self, name: &str) -> Option<&[String]> {
+        self.head.query_parameters(name)
+    }
+
+    fn client_ip(&self) -> Option<IpAddr> {
+        self.head.client_ip()
+    }
+
+    fn request_id(&self) -> Option<&MessageId> {
+        self.head.request_id()
+    }
+}
+
+/// Endpoint request context available to admission guards before body reads.
+pub struct RouteRequestHead {
+    endpoint: Arc<EndpointMetadata>,
+    normalized: NormalizedRequestHead,
+    extensions: Extensions,
+}
+
+impl fmt::Debug for RouteRequestHead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RouteRequestHead")
+            .field("endpoint", &self.endpoint.id)
+            .field("request", &self.normalized)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RouteRequestHead {
+    pub(crate) fn new(
+        endpoint: Arc<EndpointMetadata>,
+        normalized: NormalizedRequestHead,
+        extensions: Extensions,
+    ) -> Self {
+        Self {
+            endpoint,
+            normalized,
+            extensions,
+        }
+    }
+
+    pub(crate) fn with_body(self, body: Bytes) -> RouteRequest {
+        RouteRequest {
+            endpoint: self.endpoint,
+            normalized: NormalizedRequest::new(self.normalized, body),
+            extensions: self.extensions,
+        }
+    }
+
+    /// Returns the portable endpoint declaration matched by Axum.
+    pub fn endpoint(&self) -> &EndpointMetadata {
+        &self.endpoint
+    }
+
+    /// Returns request metadata normalized before the body is read.
+    pub const fn normalized(&self) -> &NormalizedRequestHead {
+        &self.normalized
+    }
+
+    /// Returns normalized request metadata mutably to trusted guards.
+    pub const fn normalized_mut(&mut self) -> &mut NormalizedRequestHead {
+        &mut self.normalized
+    }
+
+    /// Returns typed request extensions populated at the application boundary.
+    pub const fn extensions(&self) -> &Extensions {
+        &self.extensions
+    }
+
+    /// Returns typed request extensions mutably for admission context.
+    pub const fn extensions_mut(&mut self) -> &mut Extensions {
+        &mut self.extensions
+    }
+}
+
+impl HttpRequestView for RouteRequestHead {
+    fn method(&self) -> &Method {
+        self.normalized.method()
+    }
+
+    fn uri(&self) -> &Uri {
+        self.normalized.uri()
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        self.normalized.headers()
+    }
+
+    fn cookie(&self, name: &str) -> Option<&str> {
+        self.normalized.cookie(name)
+    }
+
+    fn path_parameter(&self, name: &str) -> Option<&str> {
+        self.normalized.path_parameter(name)
+    }
+
+    fn query_parameters(&self, name: &str) -> Option<&[String]> {
+        self.normalized.query_parameters(name)
+    }
+
+    fn client_ip(&self) -> Option<IpAddr> {
+        self.normalized.client_ip()
+    }
+
+    fn request_id(&self) -> Option<&MessageId> {
+        self.normalized.request_id()
+    }
+}
+
 /// Complete per-request context passed through middleware and into route I/O.
 pub struct RouteRequest {
     endpoint: Arc<EndpointMetadata>,
@@ -140,18 +310,6 @@ impl fmt::Debug for RouteRequest {
 }
 
 impl RouteRequest {
-    pub(crate) fn new(
-        endpoint: Arc<EndpointMetadata>,
-        normalized: NormalizedRequest,
-        extensions: Extensions,
-    ) -> Self {
-        Self {
-            endpoint,
-            normalized,
-            extensions,
-        }
-    }
-
     /// Returns the portable endpoint declaration matched by Axum.
     pub fn endpoint(&self) -> &EndpointMetadata {
         &self.endpoint
@@ -177,12 +335,13 @@ impl RouteRequest {
     where
         T: DeserializeOwned,
     {
-        let encoded =
-            serde_urlencoded::to_string(&self.normalized.path_parameters).map_err(|error| {
+        let encoded = serde_urlencoded::to_string(&self.normalized.head.path_parameters).map_err(
+            |error| {
                 HttpRejection::bad_request("failed to normalize path parameters")
                     .with_source(error)
                     .into_error()
-            })?;
+            },
+        )?;
         serde_urlencoded::from_str(&encoded).map_err(|error| {
             HttpRejection::bad_request("path parameters do not match the expected shape")
                 .with_source(error)
@@ -196,7 +355,7 @@ impl RouteRequest {
         T: DeserializeOwned,
     {
         let mut serializer = form_urlencoded::Serializer::new(String::new());
-        for (name, values) in &self.normalized.query_parameters {
+        for (name, values) in &self.normalized.head.query_parameters {
             for value in values {
                 serializer.append_pair(name, value);
             }
@@ -213,7 +372,7 @@ impl RouteRequest {
     where
         T: std::str::FromStr,
     {
-        let mut values = self.normalized.headers.get_all(name).iter();
+        let mut values = self.normalized.head.headers.get_all(name).iter();
         let Some(value) = values.next() else {
             return Ok(None);
         };
@@ -253,6 +412,7 @@ impl RouteRequest {
         T: std::str::FromStr,
     {
         self.normalized
+            .head
             .headers
             .get_all(name)
             .iter()
@@ -305,7 +465,7 @@ impl RouteRequest {
     }
 
     pub(crate) fn require_json_acceptable(&self) -> soaprs_core::SoapResult<()> {
-        let values = self.normalized.headers.get_all(ACCEPT);
+        let values = self.normalized.head.headers.get_all(ACCEPT);
         if values.iter().next().is_none() {
             return Ok(());
         }
@@ -326,7 +486,7 @@ impl RouteRequest {
     }
 
     fn require_json_content_type(&self) -> soaprs_core::SoapResult<()> {
-        let mut values = self.normalized.headers.get_all(CONTENT_TYPE).iter();
+        let mut values = self.normalized.head.headers.get_all(CONTENT_TYPE).iter();
         let Some(value) = values.next() else {
             return Err(HttpRejection::unsupported_media_type(
                 "JSON request requires Content-Type: application/json",

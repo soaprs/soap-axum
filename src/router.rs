@@ -25,9 +25,10 @@ use soaprs_http::{
 };
 
 use crate::{
-    EndpointBinding, EndpointHook, EndpointMiddleware, EndpointNext, EndpointOutcome,
-    HttpRejection, NormalizedRequest, PluginContext, ResponseView, RouteRequest, RouteResponse,
-    RouterPlugin, plugin::RouterTransform, policy::apply_response_policies,
+    EndpointBinding, EndpointGuard, EndpointGuardRejection, EndpointHook, EndpointMiddleware,
+    EndpointNext, EndpointOutcome, HttpRejection, NormalizedRequestHead, PluginContext,
+    ResponseView, RouteRequestHead, RouteResponse, RouterPlugin, plugin::RouterTransform,
+    policy::apply_response_policies,
 };
 
 const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -43,12 +44,14 @@ impl SoapRouter {
     }
 }
 
-/// Composition root for catalog bindings, middleware, hooks, and plugins.
+/// Composition root for catalog bindings, guards, middleware, hooks, and plugins.
 pub struct SoapRouterBuilder {
     catalog: EndpointCatalog,
     bindings: HashMap<EndpointId, EndpointBinding>,
+    global_guards: Vec<Arc<dyn EndpointGuard>>,
     global_middleware: Vec<Arc<dyn EndpointMiddleware>>,
     global_hooks: Vec<Arc<dyn EndpointHook>>,
+    endpoint_guards: HashMap<EndpointId, Vec<Arc<dyn EndpointGuard>>>,
     endpoint_middleware: HashMap<EndpointId, Vec<Arc<dyn EndpointMiddleware>>>,
     endpoint_hooks: HashMap<EndpointId, Vec<Arc<dyn EndpointHook>>>,
     router_augmentations: Vec<RouterTransform>,
@@ -65,8 +68,10 @@ impl SoapRouterBuilder {
         Self {
             catalog,
             bindings: HashMap::new(),
+            global_guards: Vec::new(),
             global_middleware: Vec::new(),
             global_hooks: Vec::new(),
+            endpoint_guards: HashMap::new(),
             endpoint_middleware: HashMap::new(),
             endpoint_hooks: HashMap::new(),
             router_augmentations: Vec::new(),
@@ -77,6 +82,16 @@ impl SoapRouterBuilder {
             error_mapper: Arc::new(soaprs_http::DefaultHttpErrorMapper),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         }
+    }
+
+    /// Appends an admission guard evaluated before request-body reads.
+    #[must_use]
+    pub fn guard<G>(mut self, guard: G) -> Self
+    where
+        G: EndpointGuard + 'static,
+    {
+        self.global_guards.push(Arc::new(guard));
+        self
     }
 
     /// Binds one declared endpoint identity to a typed target and route mapper.
@@ -128,8 +143,10 @@ impl SoapRouterBuilder {
         }
         let mut context = PluginContext {
             catalog: &self.catalog,
+            global_guards: &mut self.global_guards,
             global_middleware: &mut self.global_middleware,
             global_hooks: &mut self.global_hooks,
+            endpoint_guards: &mut self.endpoint_guards,
             endpoint_middleware: &mut self.endpoint_middleware,
             endpoint_hooks: &mut self.endpoint_hooks,
             router_augmentations: &mut self.router_augmentations,
@@ -170,7 +187,7 @@ impl SoapRouterBuilder {
     /// This escape hatch is intended for contract metadata used only by
     /// documentation/schema tooling or for enforcement delegated outside this
     /// router. Security-sensitive applications should prefer installing a
-    /// provider through middleware or a router plugin.
+    /// provider through a phase-appropriate guard, middleware, or router plugin.
     pub fn allow_unenforced(
         mut self,
         endpoint_id: &str,
@@ -221,6 +238,12 @@ impl SoapRouterBuilder {
             })?;
             let path = endpoint.path.as_str().to_owned();
 
+            let mut guards = self.global_guards.clone();
+            if let Some(installed) = self.endpoint_guards.remove(&endpoint_id) {
+                guards.extend(installed);
+            }
+            guards.extend(binding.guards);
+
             let mut middleware = self.global_middleware.clone();
             if let Some(installed) = self.endpoint_middleware.remove(&endpoint_id) {
                 middleware.extend(installed);
@@ -228,6 +251,7 @@ impl SoapRouterBuilder {
             middleware.extend(binding.middleware);
             validate_enforcement_coverage(
                 &endpoint,
+                &guards,
                 &middleware,
                 &self.router_enforcement_capabilities,
                 self.allowed_unenforced_capabilities.get(&endpoint_id),
@@ -242,6 +266,7 @@ impl SoapRouterBuilder {
             let runtime = Arc::new(EndpointRuntime {
                 endpoint: Arc::new(endpoint),
                 target: binding.target,
+                guards,
                 middleware,
                 hooks,
                 error_mapper: Arc::clone(&self.error_mapper),
@@ -270,6 +295,7 @@ impl SoapRouterBuilder {
 
 fn validate_enforcement_coverage(
     endpoint: &EndpointMetadata,
+    guards: &[Arc<dyn EndpointGuard>],
     middleware: &[Arc<dyn EndpointMiddleware>],
     router_capabilities: &HashSet<HttpEnforcementCapability>,
     allowed_unenforced: Option<&HashSet<HttpEnforcementCapability>>,
@@ -282,10 +308,17 @@ fn validate_enforcement_coverage(
                 return false;
             }
             let provided_at_router = router_capabilities.contains(required);
-            let provided_at_endpoint = *required != HttpEnforcementCapability::Cors
-                && middleware
+            let provided_at_endpoint = match required {
+                HttpEnforcementCapability::Authentication
+                | HttpEnforcementCapability::RateLimit
+                | HttpEnforcementCapability::Csrf => guards
                     .iter()
-                    .any(|middleware| middleware.enforcement_capabilities().contains(required));
+                    .any(|guard| guard.enforcement_capabilities().contains(required)),
+                HttpEnforcementCapability::RequestValidation => middleware
+                    .iter()
+                    .any(|middleware| middleware.enforcement_capabilities().contains(required)),
+                HttpEnforcementCapability::Cors => false,
+            };
             !provided_at_router && !provided_at_endpoint
         })
         .collect::<Vec<HttpEnforcementCapability>>();
@@ -306,6 +339,7 @@ fn validate_enforcement_coverage(
 struct EndpointRuntime {
     endpoint: Arc<EndpointMetadata>,
     target: Arc<dyn crate::binding::EndpointTarget>,
+    guards: Vec<Arc<dyn EndpointGuard>>,
     middleware: Vec<Arc<dyn EndpointMiddleware>>,
     hooks: Vec<Arc<dyn EndpointHook>>,
     error_mapper: Arc<dyn HttpErrorMapper>,
@@ -314,14 +348,22 @@ struct EndpointRuntime {
 
 impl EndpointRuntime {
     async fn dispatch(&self, params: RawPathParams, request: Request<Body>) -> Response {
-        let mut request = match self.normalize(params, request).await {
+        let pipeline = self.dispatch_pipeline(params, request);
+        if let Some(timeout) = self.endpoint.timeout {
+            match tokio::time::timeout(timeout, pipeline).await {
+                Ok(response) => response,
+                Err(_) => self.timeout_response(),
+            }
+        } else {
+            pipeline.await
+        }
+    }
+
+    async fn dispatch_pipeline(&self, params: RawPathParams, request: Request<Body>) -> Response {
+        let (mut request_head, body) = match self.normalize_head(params, request) {
             Ok(request) => request,
             Err(error) => {
-                let mut response = error_response(self.error_mapper.as_ref(), &error);
-                if let Err(error) = apply_response_policies(&self.endpoint, response.headers_mut())
-                {
-                    return error_response(self.error_mapper.as_ref(), &error);
-                }
+                let response = self.error_response_with_policies(&error);
                 let view = ResponseView::new(response.status(), response.headers());
                 for hook in &self.hooks {
                     hook.on_normalization_rejection(&self.endpoint, &error, view);
@@ -329,6 +371,28 @@ impl EndpointRuntime {
                 return response;
             }
         };
+
+        for hook in &self.hooks {
+            hook.on_request_head(&request_head);
+        }
+        for guard in &self.guards {
+            if let Err(rejection) = guard.check(&mut request_head).await {
+                return self.guard_rejection_response(&request_head, rejection);
+            }
+        }
+
+        let body = match self.read_body(body).await {
+            Ok(body) => body,
+            Err(error) => {
+                let response = self.error_response_with_policies(&error);
+                let view = ResponseView::new(response.status(), response.headers());
+                for hook in &self.hooks {
+                    hook.on_body_rejection(&request_head, &error, view);
+                }
+                return response;
+            }
+        };
+        let mut request = request_head.with_body(body);
         for hook in &self.hooks {
             hook.on_request(&request);
         }
@@ -338,17 +402,7 @@ impl EndpointRuntime {
             target: self.target.as_ref(),
         }
         .run(&mut request);
-        let outcome = if let Some(timeout) = self.endpoint.timeout {
-            match tokio::time::timeout(timeout, invocation).await {
-                Ok(outcome) => outcome,
-                Err(_) => EndpointOutcome::failure(SoapError::timeout(format!(
-                    "endpoint `{}` request timed out",
-                    self.endpoint.id
-                ))),
-            }
-        } else {
-            invocation.await
-        };
+        let outcome = invocation.await;
 
         for hook in &self.hooks {
             hook.on_outcome(&request, &outcome);
@@ -368,11 +422,11 @@ impl EndpointRuntime {
         response
     }
 
-    async fn normalize(
+    fn normalize_head(
         &self,
         params: RawPathParams,
         request: Request<Body>,
-    ) -> SoapResult<RouteRequest> {
+    ) -> SoapResult<(RouteRequestHead, Body)> {
         let (parts, body) = request.into_parts();
         let cookies = parse_cookies(&parts.headers)?;
         let query_parameters = parse_query(parts.uri.query())?;
@@ -380,13 +434,28 @@ impl EndpointRuntime {
             .iter()
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect::<BTreeMap<_, _>>();
+        let normalized = NormalizedRequestHead::new(
+            parts.method,
+            parts.uri,
+            parts.headers,
+            cookies,
+            path_parameters,
+            query_parameters,
+        );
+        Ok((
+            RouteRequestHead::new(Arc::clone(&self.endpoint), normalized, parts.extensions),
+            body,
+        ))
+    }
+
+    async fn read_body(&self, body: Body) -> SoapResult<bytes::Bytes> {
         let endpoint_limit = self
             .endpoint
             .body_limit
             .map(|policy| usize::try_from(policy.max_bytes.get()).unwrap_or(usize::MAX))
             .unwrap_or(self.max_body_bytes);
         let limit = endpoint_limit.min(self.max_body_bytes);
-        let body = to_bytes(body, limit).await.map_err(|error| {
+        to_bytes(body, limit).await.map_err(|error| {
             if Error::source(&error).is_some_and(|source| source.is::<LengthLimitError>()) {
                 HttpRejection::payload_too_large(format!(
                     "request body exceeds the {limit}-byte limit"
@@ -396,21 +465,46 @@ impl EndpointRuntime {
             } else {
                 SoapError::infrastructure("failed to read HTTP request body").with_source(error)
             }
-        })?;
-        let normalized = NormalizedRequest::new(
-            parts.method,
-            parts.uri,
-            parts.headers,
-            cookies,
-            path_parameters,
-            query_parameters,
-            body,
-        );
-        Ok(RouteRequest::new(
-            Arc::clone(&self.endpoint),
-            normalized,
-            parts.extensions,
-        ))
+        })
+    }
+
+    fn guard_rejection_response(
+        &self,
+        request: &RouteRequestHead,
+        rejection: EndpointGuardRejection,
+    ) -> Response {
+        let error = rejection.error();
+        let mut response = error_response(self.error_mapper.as_ref(), error);
+        if let Err(effect_error) = apply_effects(&mut response, rejection.effects()) {
+            response = error_response(self.error_mapper.as_ref(), &effect_error);
+        }
+        if let Err(policy_error) = apply_response_policies(&self.endpoint, response.headers_mut()) {
+            response = error_response(self.error_mapper.as_ref(), &policy_error);
+        }
+        let view = ResponseView::new(response.status(), response.headers());
+        for hook in &self.hooks {
+            hook.on_guard_rejection(request, error, view);
+        }
+        response
+    }
+
+    fn timeout_response(&self) -> Response {
+        let error =
+            SoapError::timeout(format!("endpoint `{}` request timed out", self.endpoint.id));
+        let response = self.error_response_with_policies(&error);
+        let view = ResponseView::new(response.status(), response.headers());
+        for hook in &self.hooks {
+            hook.on_timeout(&self.endpoint, &error, view);
+        }
+        response
+    }
+
+    fn error_response_with_policies(&self, error: &SoapError) -> Response {
+        let mut response = error_response(self.error_mapper.as_ref(), error);
+        if let Err(policy_error) = apply_response_policies(&self.endpoint, response.headers_mut()) {
+            response = error_response(self.error_mapper.as_ref(), &policy_error);
+        }
+        response
     }
 }
 
