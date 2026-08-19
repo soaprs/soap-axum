@@ -11,25 +11,25 @@ jobs:
       run:
         working-directory: soap-axum
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: soap-axum
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: soaprs/soap
           ref: v0.6.0
           path: soaprs
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: soaprs/soap-validation
           ref: v0.6.0
           path: soap-validation
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: soaprs/soap-rate-limit
           ref: v0.6.0
           path: soap-rate-limit
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy,rustfmt
       - run: cargo fmt --check
