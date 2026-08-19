@@ -357,14 +357,14 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "soaprs-auth"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "soaprs-core",
 ]
 
 [[package]]
 name = "soaprs-auth-http"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "http",
  "soaprs-auth",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "soaprs-axum"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "axum",
  "bytes",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "soaprs-contract-tests"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "http",
  "soaprs-auth",
@@ -412,11 +412,11 @@ dependencies = [
 
 [[package]]
 name = "soaprs-core"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "soaprs-cqrs"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "soaprs-core",
  "soaprs-events",
@@ -424,14 +424,14 @@ dependencies = [
 
 [[package]]
 name = "soaprs-events"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "soaprs-core",
 ]
 
 [[package]]
 name = "soaprs-http"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "http",
  "soaprs-auth",
@@ -440,14 +440,14 @@ dependencies = [
 
 [[package]]
 name = "soaprs-rate-limit"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "soaprs-core",
 ]
 
 [[package]]
 name = "soaprs-realtime"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "soaprs-auth",
  "soaprs-core",
@@ -455,14 +455,14 @@ dependencies = [
 
 [[package]]
 name = "soaprs-repository"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "soaprs-core",
 ]
 
 [[package]]
 name = "soaprs-validation"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "soaprs-core",
  "soaprs-http",
