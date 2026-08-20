@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-20
+
+### Changed
+
+- Repository examples and the reference integration are excluded from
+  published Cargo packages.
+
 ### Added
 
 - A runnable production-auth reference integrating Argon2id password login,
