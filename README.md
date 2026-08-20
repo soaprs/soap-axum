@@ -114,7 +114,7 @@ The `auth` feature composes the framework-neutral contracts from `soaprs-auth`
 and `soaprs-auth-http` as a pre-body admission guard:
 
 ```toml
-soaprs-axum = { version = "0.5", features = ["auth"] }
+soaprs-axum = { version = "0.6.0", features = ["auth"] }
 ```
 
 `AuthenticationGuard` delegates credential extraction and authentication
@@ -155,12 +155,12 @@ to enter the neutral limiter.
 
 ```toml
 soaprs-axum = {
-  version = "0.5",
+  version = "0.6.0",
   features = ["auth", "validation", "rate-limit"]
 }
 ```
 
-The capability crates share the `0.5` contract line with `soaprs` and this
+The capability crates share the `0.6` contract line with `soaprs` and this
 adapter. Sibling path dependencies keep repository development atomic; packaged
 releases resolve the same versions from the registry.
 
@@ -198,6 +198,29 @@ curl -i -X POST http://127.0.0.1:3002/notes \
   -H 'x-csrf-token: demo' \
   -d '{"text":"separated boundary"}'
 ```
+
+The production-auth reference composes `soaprs-auth-password` and
+`soaprs-auth-jwt` through `soaprs-auth-http` and this adapter. It loads its
+HS256 key from the environment, returns short-lived bearer access tokens, and
+keeps the rotating opaque refresh token in a `Secure`, `HttpOnly`,
+`SameSite=Strict`, `/auth`-scoped cookie:
+
+```console
+SOAPRS_JWT_HS256_KEY='replace-with-at-least-32-secret-bytes' \
+  cargo run --manifest-path reference/production-auth/Cargo.toml
+
+curl -i -X POST http://127.0.0.1:3001/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"username":"ada","password":"correct horse battery staple"}'
+```
+
+It exposes `POST /auth/login`, `/auth/refresh`, `/auth/logout`,
+`/auth/logout-all`, plus `GET /me`, `/reports`, and `/ws-handshake`. The last
+route demonstrates that the same bearer extractor, JWT authenticator, and
+pre-body authorization guard can protect a later WebSocket upgrade. The
+included in-memory identity and refresh stores are test fixtures, not
+production persistence; replace them with application adapters implementing
+the documented atomic ports.
 
 `security_telemetry` keeps the example CORS/CSRF enforcement and console
 telemetry in application-owned extensions. It demonstrates router-level

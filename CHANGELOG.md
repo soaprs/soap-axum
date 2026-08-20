@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A runnable production-auth reference integrating Argon2id password login,
+  strict JWT access tokens, atomic opaque refresh rotation and reuse detection,
+  secure refresh cookies, logout/revoke-all, permission policies, and a
+  WebSocket-handshake-ready authenticated route.
+
 ## [0.6.0] - 2026-08-19
 
 ### Added

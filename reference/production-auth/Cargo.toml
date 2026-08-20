@@ -1,0 +1,43 @@
+[package]
+name = "soaprs-production-auth-reference"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[features]
+default = ["auth"]
+auth = []
+
+[[bin]]
+name = "production-auth-reference"
+path = "../../examples/production_auth.rs"
+test = true
+
+[dependencies]
+axum = "0.8"
+http = "1"
+jsonwebtoken = { version = "10.3.0", default-features = false, features = ["aws_lc_rs"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+soaprs-auth = { version = "0.6.0", path = "../../../soaprs/crates/soaprs-auth" }
+soaprs-auth-http = { version = "0.6.0", path = "../../../soaprs/crates/soaprs-auth-http" }
+soaprs-auth-jwt = { version = "0.6.0", path = "../../../soap-auth-jwt" }
+soaprs-auth-password = { version = "0.6.0", path = "../../../soap-auth-password" }
+soaprs-axum = { version = "0.6.0", path = "../..", features = ["auth"] }
+soaprs-core = { version = "0.6.0", path = "../../../soaprs/crates/soaprs-core" }
+soaprs-http = { version = "0.6.0", path = "../../../soaprs/crates/soaprs-http" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
+
+[patch.crates-io]
+soaprs-auth = { path = "../../../soaprs/crates/soaprs-auth" }
+soaprs-core = { path = "../../../soaprs/crates/soaprs-core" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+expect_used = "deny"
+unwrap_used = "deny"
